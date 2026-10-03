@@ -73,7 +73,7 @@ extension WidgetsModel {
             weatherPlace = Self.abbreviatingState(located.name)
             weatherTemperature = "\(Int(current.temperature.rounded()))°"
             weatherHighLow = "↑\(Int(current.high.rounded())) ↓\(Int(current.low.rounded()))"
-            weatherSymbol = Self.symbol(for: current.code)
+            weatherSymbol = Self.symbol(for: current.code, isDay: current.isDay)
         }
     }
 
@@ -149,7 +149,14 @@ extension WidgetsModel {
         (await geocoderResults(query, count: 6) ?? []).compactMap { City(hit: $0) }
     }
 
-    private struct Current: Sendable { let temperature: Double; let high: Double; let low: Double; let code: Int }
+    private struct Current: Sendable {
+        let temperature: Double
+        let high: Double
+        let low: Double
+        /// nil when the reading carries none, which is unknown rather than a clear sky.
+        let code: Int?
+        let isDay: Bool
+    }
 
     /// `noMatch` and `failed` apart, because they retry differently: a name the geocoder does not
     /// know stays unknown a minute later, while a request that never got through may well get through.
@@ -168,11 +175,32 @@ extension WidgetsModel {
     private nonisolated static func geocoderResults(_ name: String, count: Int) async -> [[String: Any]]? {
         var parts = URLComponents(string: "https://geocoding-api.open-meteo.com/v1/search")!
         parts.queryItems = [.init(name: "name", value: name), .init(name: "count", value: String(count))]
-        guard let (data, _) = try? await URLSession.shared.data(from: parts.url!),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              json["error"] as? Bool != true
-        else { return nil }
+        guard let json = await openMeteoJSON(parts.url!, for: "the city search") else { return nil }
         return json["results"] as? [[String: Any]] ?? []
+    }
+
+    /// One Open-Meteo request, parsed. Every way it can fail is logged with its reason: the tile
+    /// shows "--°" for all of them, so the log is the only place they differ. A cancelled request
+    /// is a superseded one, not a failure, and stays quiet.
+    private nonisolated static func openMeteoJSON(_ url: URL, for what: String) async -> [String: Any]? {
+        let data: Data
+        do {
+            data = try await URLSession.shared.data(from: url).0
+        } catch {
+            if !(error is CancellationError), (error as? URLError)?.code != .cancelled {
+                NSLog("DockPlus: \(what) failed: \(error.localizedDescription)")
+            }
+            return nil
+        }
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            NSLog("DockPlus: \(what) answered with something that is not a JSON object")
+            return nil
+        }
+        if json["error"] as? Bool == true {
+            NSLog("DockPlus: \(what) was refused: \(json["reason"] as? String ?? "no reason given")")
+            return nil
+        }
+        return json
     }
 
     private nonisolated static func forecast(latitude: Double, longitude: Double, fahrenheit: Bool) async -> Current? {
@@ -180,29 +208,37 @@ extension WidgetsModel {
         parts.queryItems = [
             .init(name: "latitude", value: String(latitude)),
             .init(name: "longitude", value: String(longitude)),
-            .init(name: "current", value: "temperature_2m,weather_code"),
+            .init(name: "current", value: "temperature_2m,weather_code,is_day"),
             .init(name: "daily", value: "temperature_2m_max,temperature_2m_min"),
             .init(name: "forecast_days", value: "1"),
             .init(name: "timezone", value: "auto"),
             .init(name: "temperature_unit", value: fahrenheit ? "fahrenheit" : "celsius"),
         ]
-        guard let (data, _) = try? await URLSession.shared.data(from: parts.url!),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let current = json["current"] as? [String: Any],
-              let temperature = current["temperature_2m"] as? Double,
-              let daily = json["daily"] as? [String: Any],
+        guard let json = await openMeteoJSON(parts.url!, for: "the forecast") else { return nil }
+        guard let current = json["current"] as? [String: Any],
+              let temperature = current["temperature_2m"] as? Double
+        else {
+            NSLog("DockPlus: the forecast has no current temperature")
+            return nil
+        }
+        guard let daily = json["daily"] as? [String: Any],
               let high = (daily["temperature_2m_max"] as? [Double])?.first,
               let low = (daily["temperature_2m_min"] as? [Double])?.first
-        else { return nil }
+        else {
+            NSLog("DockPlus: the forecast has no high and low for today (daily arrays missing or null)")
+            return nil
+        }
         return Current(temperature: temperature, high: high, low: low,
-                       code: current["weather_code"] as? Int ?? 0)
+                       code: current["weather_code"] as? Int, isDay: current["is_day"] as? Int != 0)
     }
 
-    /// WMO weather codes, coarsely.
-    private nonisolated static func symbol(for code: Int) -> String {
-        switch code {
-        case 0: "sun.max.fill"
-        case 1, 2: "cloud.sun.fill"
+    /// WMO weather codes, coarsely. Open-Meteo's `is_day` swaps the sun for the moon on the
+    /// clear and partly cloudy codes; a missing code is unknown, not a clear sky.
+    nonisolated static func symbol(for code: Int?, isDay: Bool = true) -> String {
+        guard let code else { return "cloud.fill" }
+        return switch code {
+        case 0: isDay ? "sun.max.fill" : "moon.stars.fill"
+        case 1, 2: isDay ? "cloud.sun.fill" : "cloud.moon.fill"
         case 3: "cloud.fill"
         case 45, 48: "cloud.fog.fill"
         case 51...67, 80...82: "cloud.rain.fill"

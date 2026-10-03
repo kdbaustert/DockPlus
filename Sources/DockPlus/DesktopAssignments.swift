@@ -160,17 +160,46 @@ enum DesktopAssignments {
             usleep(10_000)
         }
         guard let menu else { return false }
-        let item = WindowActions.children(of: menu)
-            .first { WindowActions.string(of: $0, kAXTitleAttribute) == "Options" }
+        // The titles are the Dock's own, so on a non-English system they are looked up in its
+        // strings; failing that, Options is taken to be the one top-level item with a submenu.
+        let options = Set(["Options", localizedDockTitle("Options")])
+        let wanted = Set([title, localizedDockTitle(title)])
+        let items = WindowActions.children(of: menu)
+        let submenu = (items.first { options.contains(WindowActions.string(of: $0, kAXTitleAttribute) ?? "") }
+            ?? items.first { !WindowActions.children(of: $0).isEmpty })
             .flatMap { WindowActions.children(of: $0).first }
-            .flatMap { options in
-                WindowActions.children(of: options).first { WindowActions.string(of: $0, kAXTitleAttribute) == title }
-            }
+        let item = submenu.flatMap { submenu in
+            WindowActions.children(of: submenu)
+                .first { wanted.contains(WindowActions.string(of: $0, kAXTitleAttribute) ?? "") }
+        }
         guard let item, AXUIElementPerformAction(item, kAXPressAction as CFString) == .success else {
             AXUIElementPerformAction(menu, "AXCancel" as CFString)
             return false
         }
         return true
+    }
+
+    /// `title` as the Dock words it in the user's language, from the strings of Dock.app itself. The
+    /// titles DockPlus builds are the Dock's English ones; unchanged when the lookup finds nothing.
+    private nonisolated static func localizedDockTitle(_ title: String) -> String {
+        let keys = ["Options": "OPTIONS", "All Desktops": "ALL_DESKTOPS", "This Desktop": "THIS_DESKTOP",
+                    "None": "NONE"]
+        let bundle = Bundle(path: "/System/Library/CoreServices/Dock.app")
+        func string(_ key: String, _ arguments: [String] = []) -> String? {
+            guard let bundle else { return nil }
+            let format = bundle.localizedString(forKey: key, value: nil, table: "DockMenus")
+            return format == key ? nil : String(format: format, arguments: arguments)
+        }
+        if let key = keys[title] { return string(key) ?? title }
+        // "Desktop on Display 2", "Desktop 3", "Desktop 3 on Display 2".
+        guard title.hasPrefix("Desktop ") else { return title }
+        let parts = title.dropFirst("Desktop ".count).components(separatedBy: " on Display ")
+        let localized = switch (title.hasPrefix("Desktop on Display "), parts.count) {
+        case (true, _): string("DESKTOP_ON", [String(title.dropFirst("Desktop on Display ".count))])
+        case (false, 1): string("OTHER_DESKTOP", parts)
+        case (false, _): string("OTHER_DESKTOP_ON", parts)
+        }
+        return localized ?? title
     }
 
     /// The fallback: the dictionary written and the Dock restarted to read it.

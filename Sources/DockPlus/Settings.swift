@@ -191,7 +191,14 @@ final class DockSettings {
     /// App paths never shown in the dock, even while running — helpers and background tools.
     var hiddenApps: [String] { didSet { store.set(hiddenApps, forKey: "hiddenApps") } }
     /// The macOS Dock's "Show suggested and recent apps": apps quit lately, after the running ones.
-    var showsRecentApps: Bool { didSet { store.set(showsRecentApps, forKey: "showsRecentApps") } }
+    var showsRecentApps: Bool {
+        didSet {
+            store.set(showsRecentApps, forKey: "showsRecentApps")
+            // Cleared here as well as lazily in DockModel, which sees neither a launch with the
+            // switch already off nor the switch turned back on before the model next looks.
+            if oldValue, !showsRecentApps, self === DockSettings.shared { recentApps = [] }
+        }
+    }
     /// App paths, most recently quit first — see `DockModel.recordingRecent`. Per Mac, unlike the
     /// switch above: it is this Mac's history rather than a preference, the same app sits at a
     /// different path (or nowhere) on another Mac, and it changes at every quit, which would
@@ -273,6 +280,15 @@ final class DockSettings {
     nonisolated static let previewDelayRange: ClosedRange<Double> = 0...2
     nonisolated static let barTintIntensityRange: ClosedRange<Double> = 0...60
     nonisolated static let barCornerRadiusRange: ClosedRange<Double> = 8...24
+    nonisolated static let weatherLatitudeRange: ClosedRange<Double> = -90...90
+    nonisolated static let weatherLongitudeRange: ClosedRange<Double> = -180...180
+
+    /// A stored number held to its slider's range. A local default outside it (`defaults write`, an
+    /// older build) would otherwise go out over sync, and every Mac — this one included — would
+    /// refuse the file as "from a newer DockPlus"; this Mac must not write what it would not read.
+    private static func ranged(_ store: UserDefaults, _ key: String, _ range: ClosedRange<Double>) -> Double {
+        min(max(store.double(forKey: key), range.lowerBound), range.upperBound)
+    }
 
     /// `store` is a parameter so a test can build one over a throwaway suite; the app only ever
     /// uses `shared`, over the standard defaults.
@@ -291,26 +307,26 @@ final class DockSettings {
         }
         store.register(defaults: Self.registeredDefaults)
         edge = DockEdge(rawValue: store.string(forKey: "edge") ?? "") ?? .bottom
-        iconSize = store.double(forKey: "iconSize")
-        iconPadding = store.double(forKey: "iconPadding")
-        dockPadding = store.double(forKey: "dockPadding")
+        iconSize = Self.ranged(store, "iconSize", Self.iconSizeRange)
+        iconPadding = Self.ranged(store, "iconPadding", Self.iconPaddingRange)
+        dockPadding = Self.ranged(store, "dockPadding", Self.dockPaddingRange)
         magnifies = store.bool(forKey: "magnifies")
-        magnifyAmount = store.double(forKey: "magnifyAmount")
-        magnifyReach = store.double(forKey: "magnifyReach")
+        magnifyAmount = Self.ranged(store, "magnifyAmount", Self.magnifyAmountRange)
+        magnifyReach = Self.ranged(store, "magnifyReach", Self.magnifyReachRange)
         magnifyOnApproach = store.bool(forKey: "magnifyOnApproach")
         smoothHover = store.bool(forKey: "smoothHover")
-        hoverIntensity = store.double(forKey: "hoverIntensity")
+        hoverIntensity = Self.ranged(store, "hoverIntensity", Self.hoverIntensityRange)
         bouncesOnLaunch = store.bool(forKey: "bouncesOnLaunch")
         clickHidesFrontmostApp = store.bool(forKey: "clickHidesFrontmostApp")
         autoHides = store.bool(forKey: "autoHides")
         autoHidesOnlyWhenOverlapped = store.bool(forKey: "autoHidesOnlyWhenOverlapped")
-        revealSensitivity = store.double(forKey: "revealSensitivity")
-        revealDelay = store.double(forKey: "revealDelay")
-        hideDelay = store.double(forKey: "hideDelay")
-        revealSpeed = store.double(forKey: "revealSpeed")
-        hideSpeed = store.double(forKey: "hideSpeed")
+        revealSensitivity = Self.ranged(store, "revealSensitivity", Self.revealSensitivityRange)
+        revealDelay = Self.ranged(store, "revealDelay", Self.revealDelayRange)
+        hideDelay = Self.ranged(store, "hideDelay", Self.hideDelayRange)
+        revealSpeed = Self.ranged(store, "revealSpeed", Self.revealSpeedRange)
+        hideSpeed = Self.ranged(store, "hideSpeed", Self.hideSpeedRange)
         showsWindowPreviews = store.bool(forKey: "showsWindowPreviews")
-        previewDelay = store.double(forKey: "previewDelay")
+        previewDelay = Self.ranged(store, "previewDelay", Self.previewDelayRange)
         previewShowsControls = store.bool(forKey: "previewShowsControls")
         livePreviews = store.bool(forKey: "livePreviews")
         showsMinimizedWindows = store.bool(forKey: "showsMinimizedWindows")
@@ -321,15 +337,20 @@ final class DockSettings {
         showsCalendar = store.bool(forKey: "showsCalendar")
         showsRunningApps = store.bool(forKey: "showsRunningApps")
         showsKeepAwake = store.bool(forKey: "showsKeepAwake")
-        widgetOrder = normalizedWidgetOrder(store.stringArray(forKey: "widgetOrder") ?? canonicalWidgetOrder)
+        // Healed like `normalizedWidgetOrder`, but names this build does not know stay: a newer
+        // build's synced order carries them, and the launch merge would write a stripped copy back.
+        var seenWidgets = Set<String>()
+        let storedOrder = (store.stringArray(forKey: "widgetOrder") ?? canonicalWidgetOrder)
+            .filter { seenWidgets.insert($0).inserted }
+        widgetOrder = storedOrder + canonicalWidgetOrder.filter { !seenWidgets.contains($0) }
         weatherLocation = store.string(forKey: "weatherLocation") ?? ""
-        weatherLatitude = store.double(forKey: "weatherLatitude")
-        weatherLongitude = store.double(forKey: "weatherLongitude")
+        weatherLatitude = Self.ranged(store, "weatherLatitude", Self.weatherLatitudeRange)
+        weatherLongitude = Self.ranged(store, "weatherLongitude", Self.weatherLongitudeRange)
         weatherFahrenheit = store.bool(forKey: "weatherFahrenheit")
         clock24Hour = store.bool(forKey: "clock24Hour")
         barTint = store.string(forKey: "barTint") ?? ""
-        barTintIntensity = store.double(forKey: "barTintIntensity")
-        barCornerRadius = store.double(forKey: "barCornerRadius")
+        barTintIntensity = Self.ranged(store, "barTintIntensity", Self.barTintIntensityRange)
+        barCornerRadius = Self.ranged(store, "barCornerRadius", Self.barCornerRadiusRange)
         iconShadows = store.bool(forKey: "iconShadows")
         showsRunningDots = store.bool(forKey: "showsRunningDots")
         showsMenuBarIcon = store.bool(forKey: "showsMenuBarIcon")
@@ -340,8 +361,11 @@ final class DockSettings {
         hidesSystemDock = store.bool(forKey: "hidesSystemDock")
         systemDockBouncesForAttention = store.bool(forKey: "systemDockBouncesForAttention")
         hiddenApps = store.stringArray(forKey: "hiddenApps") ?? []
-        showsRecentApps = store.bool(forKey: "showsRecentApps")
-        recentApps = store.stringArray(forKey: "recentApps") ?? []
+        let showsRecents = store.bool(forKey: "showsRecentApps")
+        showsRecentApps = showsRecents
+        let recents = showsRecents ? store.stringArray(forKey: "recentApps") ?? [] : []
+        if recents.isEmpty { store.set(recents, forKey: "recentApps") }
+        recentApps = recents
         stackSorts = store.dictionary(forKey: "stackSorts") as? [String: String] ?? [:]
         stackDisplays = store.dictionary(forKey: "stackDisplays") as? [String: String] ?? [:]
 

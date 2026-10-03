@@ -92,6 +92,12 @@ struct MenuWindows: Equatable, Sendable {
 
 @MainActor
 @Observable
+final class MenuOpenToken {
+    var opens = 0
+}
+
+@MainActor
+@Observable
 final class DockModel {
     nonisolated static let finderPath = "/System/Library/CoreServices/Finder.app"
     nonisolated static let finderID = key(URL(fileURLWithPath: finderPath))
@@ -123,11 +129,13 @@ final class DockModel {
     /// DockModel+Sweeps.swift.
     var menuWindows: [pid_t: MenuWindows] = [:]
     @ObservationIgnored var menuWindowsAsked: [pid_t: Date] = [:]
-    /// Counts menus opening, for a menu that shows what nothing observed announces — the Space in
-    /// front, macOS's own settings — to read: SwiftUI rebuilds a menu it built before only when
-    /// something it observes changes (measured: Finder's, built on Desktop 4, still offered Desktop 4
-    /// as This Desktop on Desktop 5).
-    private(set) var menusOpened = 0
+    /// One counter per item, bumped when that item's menu opens, for a menu that shows what nothing
+    /// observed announces — the Space in front, macOS's own settings — to read: SwiftUI rebuilds a
+    /// menu it built before only when something it observes changes (measured: Finder's, built on
+    /// Desktop 4, still offered Desktop 4 as This Desktop on Desktop 5). Per item, not one global
+    /// count: every menu SwiftUI has built stays alive observing, and a shared count re-ran the
+    /// expensive Options content of all of them each time any menu opened.
+    @ObservationIgnored private var menuTokens: [String: MenuOpenToken] = [:]
 
     @ObservationIgnored let settings: DockSettings
     /// Opens a Grid stack's grid from the dock it was clicked on, answering whether one did. Set by
@@ -152,11 +160,17 @@ final class DockModel {
     /// finishing 50 ms after starting, which cut the bounce off before a frame of it was drawn.
     private nonisolated static let bounceCycle: TimeInterval = 0.6
     @ObservationIgnored private var launchStarts: [String: Date] = [:]
+    /// When each bouncing icon's keyframe cycle actually began: from the launch's start, unless the
+    /// dock was hidden then, and then from the reveal. The stop is timed from here, as it only lands
+    /// on a cycle boundary counted from where the cycle began.
+    @ObservationIgnored private var bounceStarts: [String: Date] = [:]
     @ObservationIgnored private var runningObservation: NSKeyValueObservation?
     /// What the running apps looked like at the last rebuild; see the maintenance timer.
-    @ObservationIgnored private var lastRunningSignature: [pid_t: Int] = [:]
+    @ObservationIgnored private var lastRunningSignature: [pid_t: URL?] = [:]
     /// Counts the maintenance timer's beats, for the minimized windows' periodic full sweep.
     @ObservationIgnored private var maintenanceBeats = 0
+    /// The frontmost app's pid and its windows (see `windowSignature`) at the last beat.
+    @ObservationIgnored private var lastWindowSignature: [Int] = []
     /// The frontmost app at the last activation — the app a switch just left, whose windows the
     /// activation sweep must still ask about.
     @ObservationIgnored private var lastFrontmostPID: pid_t?
@@ -206,10 +220,12 @@ final class DockModel {
         // objects themselves. Per-app KVO on `activationPolicy` was tried and crashed (SIGSEGV in
         // AppKit's runningApplicationNotificationCallback, report 2026-09-28-102833): AppKit can
         // deallocate an app's record while it is still observed. Policy flips with no membership
-        // change are caught by the timer below instead.
+        // change are caught by the timer below instead. Every Launch Services process fires this,
+        // background agents and DockPlus's own osascript children included, so it rebuilds only when
+        // the regular apps differ.
         runningObservation = NSWorkspace.shared.observe(\.runningApplications) {
             @Sendable [weak self] _, _ in
-            Task { @MainActor in self?.scheduleRebuild() }
+            Task { @MainActor in self?.scheduleRebuildIfRunningAppsChanged() }
         }
         rebuild()
         refreshTrash()
@@ -240,11 +256,20 @@ final class DockModel {
                 self.refreshBadges()
             }
         }
-        NotificationCenter.default.addObserver(forName: NSMenu.didBeginTrackingNotification, object: nil, queue: .main) {
-            [weak self] _ in
-            MainActor.assumeIsolated { self?.menusOpened += 1 }
-        }
         startMaintenance()
+    }
+
+    /// How often `id`'s menu has opened. Read from the menu's body, which registers the dependency.
+    func menuOpens(of id: String) -> Int { menuToken(id).opens }
+
+    /// `id`'s menu is opening: only that menu rebuilds.
+    func menuOpened(_ id: String) { menuToken(id).opens += 1 }
+
+    private func menuToken(_ id: String) -> MenuOpenToken {
+        if let token = menuTokens[id] { return token }
+        let token = MenuOpenToken()
+        menuTokens[id] = token
+        return token
     }
 
     /// Things reach the Trash from Finder with nothing announced to DockPlus, and it cannot watch a
@@ -264,8 +289,19 @@ final class DockModel {
                 guard let self else { return }
                 self.maintenanceBeats += 1
                 self.refreshTrash()
-                self.refreshMinimizedWindows(only: self.maintenanceBeats % 15 == 0 ? nil
-                    : NSWorkspace.shared.frontmostApplication.map { [$0.processIdentifier] })
+                // The frontmost app is asked over Accessibility only when the window server says its
+                // windows changed — that wakes the app, where the window server's list does not. A
+                // minimize or restore flips a window's on-screen flag, so it still shows within a beat.
+                // Off, the call is what clears the tiles, so it is not skipped.
+                if self.maintenanceBeats % 15 == 0 {
+                    self.lastWindowSignature = Self.windowSignature(
+                        of: NSWorkspace.shared.frontmostApplication?.processIdentifier)
+                    self.refreshMinimizedWindows()
+                } else if self.frontmostWindowsChanged() || !self.settings.showsMinimizedWindows {
+                    self.refreshMinimizedWindows(only: NSWorkspace.shared.frontmostApplication.map {
+                        [$0.processIdentifier]
+                    })
+                }
                 if self.maintenanceBeats % 3 == 0 {
                     self.rebuildIfRunningAppsChanged()
                     self.refreshBadges()
@@ -276,6 +312,12 @@ final class DockModel {
         timer.tolerance = 0.5
         RunLoop.main.add(timer, forMode: .common)
         maintenanceTimer = timer
+    }
+
+    private func frontmostWindowsChanged() -> Bool {
+        let now = Self.windowSignature(of: NSWorkspace.shared.frontmostApplication?.processIdentifier)
+        defer { lastWindowSignature = now }
+        return now != lastWindowSignature
     }
 
     /// Stopped while nobody can see the dock; see AppDelegate. Waking catches up at once on
@@ -379,13 +421,31 @@ final class DockModel {
         if shown != items { items = shown }
     }
 
-    /// Every running process with its activation policy — in-memory reads only, no disk.
-    private static func runningSignature(_ apps: [NSRunningApplication]) -> [pid_t: Int] {
-        Dictionary(apps.map { ($0.processIdentifier, $0.activationPolicy.rawValue) }) { first, _ in first }
+    /// The apps that get a tile: regular ones, not DockPlus. By bundle as well as pid: the now-playing
+    /// poll's osascript children register under DockPlus's bundle as regular apps, and each flashed
+    /// a tile for its tenth of a second.
+    private static func regularApps(_ all: [NSRunningApplication]) -> [NSRunningApplication] {
+        let me = ProcessInfo.processInfo.processIdentifier
+        let myBundleID = Bundle.main.bundleIdentifier
+        return all.filter {
+            $0.activationPolicy == .regular && $0.processIdentifier != me
+                && (myBundleID == nil || $0.bundleIdentifier != myBundleID)
+        }
+    }
+
+    /// The regular apps and where each lives — in-memory reads only, no disk.
+    private static func runningSignature(_ apps: [NSRunningApplication]) -> [pid_t: URL?] {
+        Dictionary(regularApps(apps).map { ($0.processIdentifier, $0.bundleURL) }) { first, _ in first }
     }
 
     private func rebuildIfRunningAppsChanged() {
         if Self.runningSignature(NSWorkspace.shared.runningApplications) != lastRunningSignature { rebuild() }
+    }
+
+    private func scheduleRebuildIfRunningAppsChanged() {
+        if Self.runningSignature(NSWorkspace.shared.runningApplications) != lastRunningSignature {
+            scheduleRebuild()
+        }
     }
 
     /// One rebuild on the next turn of the run loop for however many asked in this one. A launch
@@ -403,16 +463,9 @@ final class DockModel {
     }
 
     func rebuild() {
-        let me = ProcessInfo.processInfo.processIdentifier
-        let myBundleID = Bundle.main.bundleIdentifier
         let all = NSWorkspace.shared.runningApplications
         lastRunningSignature = Self.runningSignature(all)
-        // By bundle as well as pid: the now-playing poll's osascript children register under
-        // DockPlus's bundle as regular apps, and each flashed a tile for its tenth of a second.
-        let running = all.filter {
-            $0.activationPolicy == .regular && $0.processIdentifier != me
-                && (myBundleID == nil || $0.bundleIdentifier != myBundleID)
-        }
+        let running = Self.regularApps(all)
         // From the one table that names every widget's switch, so a widget added there is enabled
         // here without a second list to forget.
         var enabledWidgets = Set(DockSettings.widgetSwitches.filter { settings[keyPath: $0.value] }.keys)
@@ -452,6 +505,7 @@ final class DockModel {
         // "pid:" key at every launch, so the cache otherwise only ever grew.
         let onBar = Set(result.flatMap { [$0.id] + $0.apps.map(\.id) })
         icons = icons.filter { onBar.contains($0.key) }
+        menuTokens = menuTokens.filter { onBar.contains($0.key) }
     }
 
     /// A running app as the item list needs it: plain values, so the list can be built in a test.
@@ -736,11 +790,21 @@ final class DockModel {
         }
     }
 
+    /// An icon's view started or stopped bouncing — which it does later than the launch when the dock
+    /// is hidden then, and again on every reveal after a hide.
+    func bounceChanged(_ id: String, isBouncing: Bool) {
+        if !isBouncing {
+            bounceStarts[id] = nil
+        } else if bounceStarts[id] == nil, launching.contains(id) {
+            bounceStarts[id] = Date()
+        }
+    }
+
     /// Stops the bounce at the end of the cycle it is in — at least one whole bounce.
     private func finishedLaunching(_ url: URL) {
         let id = Self.key(url)
         guard let start = launchStarts[id] else { return }
-        let remaining = Self.bounceRemaining(after: Date().timeIntervalSince(start))
+        let remaining = Self.bounceRemaining(after: Date().timeIntervalSince(bounceStarts[id] ?? start))
         DispatchQueue.main.asyncAfter(deadline: .now() + remaining) { [weak self] in
             MainActor.assumeIsolated { self?.stopBouncing(id, startedAt: start) }
         }
@@ -758,6 +822,7 @@ final class DockModel {
     private func stopBouncing(_ id: String, startedAt start: Date) {
         guard launchStarts[id] == start else { return }
         launchStarts[id] = nil
+        bounceStarts[id] = nil
         launching.remove(id)
     }
 

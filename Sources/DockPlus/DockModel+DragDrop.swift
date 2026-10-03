@@ -280,9 +280,13 @@ extension DockModel {
             endDrag()
             return true
         }
-        // A bar drag let go on the Trash takes the item off the bar, as the macOS Dock does; the gap
-        // is pinned to the end of the section over it, so committing would only move the item.
-        if target?.kind == .trash, drag != nil, endDragRemoving() { return true }
+        // A bar drag let go on the Trash takes the item off the bar, as the macOS Dock does, or goes
+        // back when it cannot come off: the gap is pinned to the end of the section over it, so
+        // committing would pin a running app or move Finder.
+        if target?.kind == .trash, drag != nil {
+            if !endDragRemoving() { endDrag() }
+            return true
+        }
         if commitDrag() { return true }
         let files = providers.filter { $0.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) }
         if files.isEmpty {
@@ -292,6 +296,9 @@ extension DockModel {
             _ = provider.loadDataRepresentation(forTypeIdentifier: dragType.identifier) { [weak self] data, _ in
                 guard let data, let path = String(data: data, encoding: .utf8) else { return }
                 Task { @MainActor in
+                    // A tile dragged out of the running-apps tile, or a gallery widget, has no drag
+                    // to put back: dropped on the Trash it is a no-op, not a place to pin it.
+                    guard target?.kind != .trash else { return }
                     if path.hasPrefix(Self.widgetIDPrefix) {
                         self?.placeWidget(String(path.dropFirst(Self.widgetIDPrefix.count)), before: target)
                     } else {

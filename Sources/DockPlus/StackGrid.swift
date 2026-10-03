@@ -68,7 +68,7 @@ final class StackGridController {
     /// was there on the way in. The panel is re-fitted to it and re-hung from the same anchor.
     private func present() {
         guard let folder = path.last, let anchor else { return }
-        let (entries, isDenied) = StackMenu.read(folder)
+        let (entries, isDenied) = StackMenu.read(folder, needsKind: sort == .kind)
         let shown = DockModel.stackContents(entries, sortedBy: sort, limit: DockModel.stackGridLimit)
         let parent = path.count > 1 ? path[path.count - 2] : nil
         host.rootView = AnyView(StackGridView(

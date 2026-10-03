@@ -101,4 +101,15 @@ final class StackSortTests: XCTestCase {
         let current = PortableSettings(stacks: ["/a"], stackSorts: ["/a": "kind"])
         XCTAssertEqual(try PortableSettings.decoded(from: current.encoded()), current)
     }
+
+    /// The kind is a Launch Services lookup per file, read only for the sort that groups on it.
+    func testKindIsReadOnlyWhenAskedFor() throws {
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("StackSortTests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        try Data().write(to: folder.appendingPathComponent("note.txt"))
+        XCTAssertFalse(try XCTUnwrap(StackMenu.read(folder).entries.first).kind.isEmpty)
+        XCTAssertEqual(try XCTUnwrap(StackMenu.read(folder, needsKind: false).entries.first).kind, "")
+    }
 }

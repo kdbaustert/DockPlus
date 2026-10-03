@@ -89,6 +89,17 @@ final class BatteryCalendarWidgetTests: XCTestCase {
         XCTAssertTrue(text.hasSuffix(" T4320"), text)
     }
 
+    /// A weekday alone names this week's: from seven days out, the date has to say it.
+    func testTimeTextNamesTheDateOfAnEventEndingAWeekOut() {
+        let time: (Date) -> String = { "T\(Int($0.timeIntervalSince(self.t0) / 60))" }
+        let end = entry("A", -5, 7 * 24 * 60 + 60).end
+        let weekday = end.formatted(.dateTime.weekday(.abbreviated))
+        let date = end.formatted(.dateTime.month(.abbreviated).day())
+        let text = WidgetsModel.calendarTimeText(for: entry("A", -5, 7 * 24 * 60 + 60), at: at(0), time: time)
+        XCTAssertEqual(text, "Now, until \(date) T10140")
+        XCTAssertNotEqual(text, "Now, until \(weekday) T10140")
+    }
+
     /// The one timer waits for the soonest start or end still ahead, else the day's end.
     func testNextBoundaryIsTheSoonestStartOrEndAhead() {
         let dayEnd = at(600)

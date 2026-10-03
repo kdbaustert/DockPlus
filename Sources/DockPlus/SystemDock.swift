@@ -59,11 +59,11 @@ enum SystemDock {
             failedAttempts = 0
             return
         }
-        // A configuration profile that forces the Dock's settings wins over any write.
-        if CFPreferencesAppValueIsForced("autohide" as CFString, domain as CFString)
-            || CFPreferencesAppValueIsForced("autohide-delay" as CFString, domain as CFString) {
-            return
-        }
+        // A configuration profile that forces a key wins over any write: a forced value that is
+        // already the wanted one is fine, and only the keys it leaves alone are written.
+        let autohideForced = CFPreferencesAppValueIsForced("autohide" as CFString, domain as CFString)
+        let delayForced = CFPreferencesAppValueIsForced("autohide-delay" as CFString, domain as CFString)
+        if (autohideForced && autohide != true) || (delayForced && delay != hiddenDelay) { return }
         guard failedAttempts < maxAttempts else {
             if failedAttempts == maxAttempts {
                 NSLog("DockPlus: the macOS Dock's auto-hide settings do not stick; no longer re-applying them")
@@ -72,8 +72,12 @@ enum SystemDock {
             return
         }
         failedAttempts += 1
-        defaults(["write", domain, "autohide", "-bool", "true"])
-        defaults(["write", domain, "autohide-delay", "-float", String(hiddenDelay)])
+        if !autohideForced, autohide != true {
+            defaults(["write", domain, "autohide", "-bool", "true"])
+        }
+        if !delayForced, delay != hiddenDelay {
+            defaults(["write", domain, "autohide-delay", "-float", String(hiddenDelay)])
+        }
         if !noBouncingIsRight { _ = put("no-bouncing", wantedNoBouncing) }
         run("/usr/bin/killall", ["Dock"])
     }
@@ -115,9 +119,6 @@ enum SystemDock {
     /// restoring only a Bool deleted it, and the user's own setting was lost with the saved copy.
     /// A key that was absent when captured is deleted.
     private static func put(_ key: String, _ value: Any?) -> Bool {
-        // A forced key is no one's to restore, and writing it would leave the profile's value in the
-        // user's own domain to outlive the profile.
-        if CFPreferencesAppValueIsForced(key as CFString, domain as CFString) { return true }
         return switch value {
         case let string as String:
             defaults(["write", domain, key, "-string", string])
@@ -133,9 +134,7 @@ enum SystemDock {
     /// `defaults delete` exits non-zero for a key that is already absent, which is the outcome
     /// wanted — so only a key that is there counts against the restore.
     private static func delete(_ key: String) -> Bool {
-        guard !CFPreferencesAppValueIsForced(key as CFString, domain as CFString),
-              userValue(key) != nil
-        else { return true }
+        guard userValue(key) != nil else { return true }
         return defaults(["delete", domain, key])
     }
 

@@ -135,7 +135,7 @@ final class StackMenu: NSMenu, NSMenuDelegate {
     func load() {
         guard !isLoaded else { return }
         isLoaded = true
-        let (entries, isDenied) = Self.read(folder)
+        let (entries, isDenied) = Self.read(folder, needsKind: sort == .kind)
         let shown = DockModel.stackContents(entries, sortedBy: sort)
         for entry in shown {
             let icon = NSWorkspace.shared.icon(forFile: entry.url.path)
@@ -168,10 +168,11 @@ final class StackMenu: NSMenu, NSMenuDelegate {
 
     /// `folder`'s contents, unsorted, or none and `isDenied`. Desktop, Documents, Downloads and
     /// removable volumes are behind a privacy permission; a folder DockPlus may not read is not an
-    /// empty one. Any other failure reads as empty.
-    static func read(_ folder: URL) -> (entries: [StackEntry], isDenied: Bool) {
+    /// empty one. Any other failure reads as empty. `needsKind` is off for a sort that never reads
+    /// the kind: it is a Launch Services lookup per file, and the one cost worth skipping.
+    static func read(_ folder: URL, needsKind: Bool = true) -> (entries: [StackEntry], isDenied: Bool) {
         do {
-            return (try entries(in: folder), false)
+            return (try entries(in: folder, needsKind: needsKind), false)
         } catch {
             return ([], (error as? CocoaError)?.code == .fileReadNoPermission)
         }
@@ -181,11 +182,11 @@ final class StackMenu: NSMenu, NSMenuDelegate {
         NSWorkspace.shared.openPrivacyPane("FilesAndFolders")
     }
 
-    private static func entries(in folder: URL) throws -> [StackEntry] {
-        let keys: [URLResourceKey] = [
-            .addedToDirectoryDateKey, .contentModificationDateKey, .localizedTypeDescriptionKey,
-            .isDirectoryKey, .isPackageKey,
+    private static func entries(in folder: URL, needsKind: Bool) throws -> [StackEntry] {
+        var keys: [URLResourceKey] = [
+            .addedToDirectoryDateKey, .contentModificationDateKey, .isDirectoryKey, .isPackageKey,
         ]
+        if needsKind { keys.append(.localizedTypeDescriptionKey) }
         let urls = try FileManager.default.contentsOfDirectory(
             at: folder, includingPropertiesForKeys: keys, options: [.skipsHiddenFiles]
         )

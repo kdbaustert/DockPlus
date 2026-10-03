@@ -26,6 +26,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var menuBarItem: MenuBarItem?
     private var settingsSync: SettingsSync?
     private var watchdog: Timer?
+    private var pendingRebuild: DispatchWorkItem?
     /// Why the dock is out of sight, by the notification that said so. Paused while any is.
     private var pauseReasons: Set<Notification.Name> = []
     private var isPaused: Bool { !pauseReasons.isEmpty }
@@ -60,7 +61,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main
         ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.rebuildControllers() }
+            MainActor.assumeIsolated { self?.scheduleRebuild() }
         }
         // `startingUpdater: true` starts the scheduled daily check (SUEnableAutomaticChecks).
         if Updater.isConfigured {
@@ -172,6 +173,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if settings.hidesSystemDock { SystemDock.hide() }
             startWatchdog()
         }
+    }
+
+    /// Waking a Mac posts a burst of screen-parameter notifications, and each rebuilt every panel.
+    private func scheduleRebuild() {
+        pendingRebuild?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            MainActor.assumeIsolated { self?.rebuildControllers() }
+        }
+        pendingRebuild = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4, execute: work)
     }
 
     /// One dock per screen the display mode names. Rebuilt whole on any change: controllers are

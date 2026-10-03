@@ -35,6 +35,9 @@ final class WidgetsModel {
     /// A running player DockPlus is not allowed to ask, when no other answered. Denied looked exactly
     /// like nothing playing, which left no clue that a permission was the reason.
     var deniedPlayer: String?
+    /// Whether `deniedPlayer` was never asked (a click can put the consent prompt up) rather than
+    /// refused (only System Settings can undo that, and macOS will not re-prompt).
+    var playerNeedsConsent = false
     /// Which player answered last — where the controls go.
     var player: String?
     /// Watches app switches only while a player is refused, to notice Automation being granted in

@@ -43,7 +43,7 @@ extension WidgetsModel {
         eventStoreObserver = NotificationCenter.default.addObserver(
             forName: .EKEventStoreChanged, object: store, queue: .main
         ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.refreshCalendar() }
+            MainActor.assumeIsolated { self?.refreshCalendarSoon() }
         }
         refreshCalendar()
     }
@@ -85,6 +85,18 @@ extension WidgetsModel {
         case .notDetermined: .notDetermined
         default: .denied
         }
+    }
+
+    /// One refresh half a second after the last change notice. A sync or a bulk edit sends a burst
+    /// of EKEventStoreChanged, and each refresh is a fetch on the main thread. It takes the
+    /// boundary timer's slot: the refresh it schedules sets that timer again.
+    private func refreshCalendarSoon() {
+        calendarTimer?.invalidate()
+        let timer = Timer(timeInterval: 0.5, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated { self?.refreshCalendar() }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        calendarTimer = timer
     }
 
     /// Reads today's events and sets the timer for the next moment the answer can change.
@@ -129,16 +141,22 @@ extension WidgetsModel {
 
     /// "10:00 AM" for an event still to come; "Now, until 10:30 AM" for one under way. One that runs
     /// past midnight names the day it ends ("Now, until Wed 5:00 PM"), or a Monday-to-Wednesday
-    /// block reads as ending today. Ending at midnight itself is still today's. Pure, for the
-    /// tests: the formatter comes in as `time`.
+    /// block reads as ending today. Ending at midnight itself is still today's. From a week out
+    /// the weekday would name this week's, so the date takes its place ("until May 16 9:00 AM").
+    /// Pure, for the tests: the formatter comes in as `time`.
     nonisolated static func calendarTimeText(
         for entry: CalendarEntry, at now: Date, time: (Date) -> String
     ) -> String {
         guard entry.start <= now else { return time(entry.start) }
         let calendar = Calendar.current
-        let tomorrow = calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: now))
+        let today = calendar.startOfDay(for: now)
+        let tomorrow = calendar.date(byAdding: .day, value: 1, to: today)
         guard let tomorrow, entry.end > tomorrow else { return "Now, until \(time(entry.end))" }
-        return "Now, until \(entry.end.formatted(.dateTime.weekday(.abbreviated))) \(time(entry.end))"
+        let nextWeek = calendar.date(byAdding: .day, value: 7, to: today)
+        let day = nextWeek.map { entry.end >= $0 } == true
+            ? entry.end.formatted(.dateTime.month(.abbreviated).day())
+            : entry.end.formatted(.dateTime.weekday(.abbreviated))
+        return "Now, until \(day) \(time(entry.end))"
     }
 
     /// The next moment the tile's answer can change: an event starting or ending, or the day

@@ -103,6 +103,40 @@ final class DockSettingsApplyTests: XCTestCase {
         XCTAssertEqual(source.portable, before)
     }
 
+    /// A local default outside a slider's range (`defaults write`) must not reach the file: every Mac
+    /// would then refuse it as "from a newer DockPlus", the writer included.
+    @MainActor
+    func testOutOfRangeDefaultsAreClampedBeforeTheyCanSync() throws {
+        let name = "DockPlusTests.\(UUID().uuidString)"
+        let store = try XCTUnwrap(UserDefaults(suiteName: name))
+        addTeardownBlock { UserDefaults.standard.removePersistentDomain(forName: name) }
+        store.set(["/Applications/Safari.app"], forKey: "pinnedApps")
+        store.set(["/Users/me/Downloads"], forKey: "stacks")
+        store.set(50.0, forKey: "hoverIntensity")
+        store.set(-3.0, forKey: "iconSize")
+        store.set(500.0, forKey: "weatherLatitude")
+        let settings = DockSettings(store: store)
+        XCTAssertEqual(settings.hoverIntensity, DockSettings.hoverIntensityRange.upperBound)
+        XCTAssertEqual(settings.iconSize, DockSettings.iconSizeRange.lowerBound)
+        XCTAssertEqual(settings.weatherLatitude, DockSettings.weatherLatitudeRange.upperBound)
+        XCTAssertFalse(settings.portable.isBeyondThisBuild)
+    }
+
+    /// A newer build's synced order can name a widget this one lacks; the launch merge would write
+    /// a stripped copy back to iCloud as a local edit.
+    @MainActor
+    func testWidgetOrderKeepsNamesThisBuildDoesNotKnow() throws {
+        let name = "DockPlusTests.\(UUID().uuidString)"
+        let store = try XCTUnwrap(UserDefaults(suiteName: name))
+        addTeardownBlock { UserDefaults.standard.removePersistentDomain(forName: name) }
+        store.set(["/Applications/Safari.app"], forKey: "pinnedApps")
+        store.set(["/Users/me/Downloads"], forKey: "stacks")
+        store.set(["stocks", "clock", "stocks", "weather"], forKey: "widgetOrder")
+        let settings = DockSettings(store: store)
+        let missing = canonicalWidgetOrder.filter { $0 != "clock" && $0 != "weather" }
+        XCTAssertEqual(settings.widgetOrder, ["stocks", "clock", "weather"] + missing)
+    }
+
     private func fields(_ settings: PortableSettings) throws -> [String: Any] {
         try XCTUnwrap(JSONSerialization.jsonObject(with: settings.encoded()) as? [String: Any])
     }

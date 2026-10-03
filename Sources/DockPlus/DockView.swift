@@ -137,6 +137,10 @@ private struct DockIcon: View {
                     LinearKeyframe(0, duration: 0.3, timingCurve: .easeIn)
                 }
             }
+            // Where the stop is timed from; see `DockModel.bounceChanged`.
+            .onChange(of: isBouncing, initial: true) { _, bouncing in
+                model.bounceChanged(item.id, isBouncing: bouncing)
+            }
             // Lit for a file dropped on the app, not for an icon passing over while being reordered.
             .brightness(isTargeted && model.drag == nil ? 0.15 : 0)
             .shadow(color: .black.opacity(model.settings.iconShadows ? 0.35 : 0), radius: 3, y: 1)
@@ -264,10 +268,10 @@ private struct DockItemMenu: View {
             if item.isRunning, let pid = item.pid {
                 AppWindowList(pid: pid, model: model)
                 Button("Show All Windows") { model.showAllWindows(item) }
-                // Read as the menu is built, and built again on every open through `menusOpened`:
+                // Read as the menu is built, and built again on every open through its item's count:
                 // hiding an app changes nothing else the menu reads, so a reopened menu went on
                 // offering Hide for a hidden app.
-                let _ = model.menusOpened
+                let _ = model.menuOpens(of: item.id)
                 if NSRunningApplication(processIdentifier: pid)?.isHidden == true {
                     Button("Unhide") { model.unhide(item) }
                 } else {
@@ -292,7 +296,7 @@ private struct DockItemMenu: View {
             }
             if let url = item.url, let bundleID = Bundle(url: url)?.bundleIdentifier {
                 // Finder always opens at login; the macOS Dock does not offer it there either.
-                AssignToMenu(bundleID: bundleID, app: url, pid: item.pid,
+                AssignToMenu(itemID: item.id, bundleID: bundleID, app: url, pid: item.pid,
                              offersOpenAtLogin: item.id != DockModel.finderID, model: model)
             }
             if item.url != nil {
@@ -344,7 +348,12 @@ private struct AppWindowList: View {
     let model: DockModel
 
     var body: some View {
-        let _ = model.requestMenuWindows(for: pid)
+        // Only the first time: later opens ask from the controller, for the one menu opening. Asked on
+        // every body run, each answer for one app re-ran every other built menu's list and asked its
+        // app again.
+        if model.menuWindows[pid] == nil {
+            let _ = model.requestMenuWindows(for: pid)
+        }
         if let listed = model.menuWindows[pid], !listed.windows.isEmpty {
             ForEach(listed.windows, id: \.id) { window in
                 Button(window.title) { WindowActions.raise(window.id, pid: pid) }
@@ -357,9 +366,10 @@ private struct AppWindowList: View {
 /// Options ▸ Open at Login and Assign To, as in the macOS Dock. Toggles rather than Buttons: in a
 /// SwiftUI menu a Toggle is what draws the checkmark (measured in FinderPlus — checkmark images on
 /// Buttons did not render). Read when the menu is built, since both live in macOS's own settings
-/// and nothing announces a change to them — and built again on every open, through
-/// `model.menusOpened`, since SwiftUI would otherwise show the one it built last.
+/// and nothing announces a change to them — and built again on every open, through the item's
+/// `model.menuOpens`, since SwiftUI would otherwise show the one it built last.
 private struct AssignToMenu: View {
+    let itemID: String
     let bundleID: String
     let app: URL
     /// The running app's, for the Desktops its windows are on.
@@ -368,7 +378,7 @@ private struct AssignToMenu: View {
     let model: DockModel
 
     var body: some View {
-        let _ = model.menusOpened
+        let _ = model.menuOpens(of: itemID)
         let current = DesktopAssignments.assignment(of: bundleID)
         Menu("Options") {
             if offersOpenAtLogin {

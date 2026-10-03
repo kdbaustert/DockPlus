@@ -121,8 +121,8 @@ struct PortableSettings: Codable, Equatable {
         p.magnifyAmount = clamp(magnifyAmount, DockSettings.magnifyAmountRange)
         p.barTintIntensity = clamp(barTintIntensity, DockSettings.barTintIntensityRange)
         p.barCornerRadius = clamp(barCornerRadius, DockSettings.barCornerRadiusRange)
-        p.weatherLatitude = clamp(weatherLatitude, -90...90)
-        p.weatherLongitude = clamp(weatherLongitude, -180...180)
+        p.weatherLatitude = clamp(weatherLatitude, DockSettings.weatherLatitudeRange)
+        p.weatherLongitude = clamp(weatherLongitude, DockSettings.weatherLongitudeRange)
         p.magnifyReach = clamp(magnifyReach, DockSettings.magnifyReachRange)
         p.hoverIntensity = clamp(hoverIntensity, DockSettings.hoverIntensityRange)
         p.previewDelay = clamp(previewDelay, DockSettings.previewDelayRange)
@@ -322,6 +322,10 @@ final class SettingsSync {
     /// Until then a write would put this Mac's settings over another's that simply had not
     /// downloaded yet — at a launch offline, or before iCloud had fetched the file.
     @ObservationIgnored private var mayWrite = false
+    /// Until then, nothing is pushed: at launch the file on disk can be one iCloud has not refreshed
+    /// yet (login is when it lags most), and a write built on it can win iCloud's conflict and make
+    /// every other Mac read its own newer edits as reverted. The first push re-reads the file.
+    @ObservationIgnored private var launchHoldUntil: Date?
     @ObservationIgnored private var lastModified: Date?
     @ObservationIgnored private var pendingWrite: DispatchWorkItem?
     @ObservationIgnored private var watcher: DispatchSourceFileSystemObject?
@@ -350,6 +354,23 @@ final class SettingsSync {
 
     private func followSwitch() {
         settings.syncsWithICloud && Self.isAvailable ? start() : stop()
+        // The poll lives as long as the switch is on, not as long as sync runs: iCloud Drive turned
+        // on after launch is only noticed by something still looking.
+        guard settings.syncsWithICloud else {
+            poll?.invalidate()
+            poll = nil
+            return
+        }
+        guard poll == nil else { return }
+        let poll = Timer(timeInterval: 30, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.followSwitch()
+                _ = self?.readRemote()
+            }
+        }
+        poll.tolerance = 5
+        RunLoop.main.add(poll, forMode: .common)
+        self.poll = poll
     }
 
     private func start() {
@@ -357,7 +378,10 @@ final class SettingsSync {
         isRunning = true
         startedWith = settings.portable
         agreed = Self.loadAgreed()
-        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        launchHoldUntil = .now + Self.absentGrace
+        // No intermediate directories: with iCloud Drive signed out they would rebuild a local
+        // com~apple~CloudDocs that is not iCloud's.
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
         // Turning sync on adopts what another Mac already put there; only an empty iCloud gets this
         // Mac's settings, and only once it has stayed empty for a while — `readRemote` writes them
         // then. A file that is not readable yet is left alone: the watcher and the poll read it again
@@ -372,12 +396,6 @@ final class SettingsSync {
             scheduleWrite()
         }
         watch(folder)
-        let poll = Timer(timeInterval: 30, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { _ = self?.readRemote() }
-        }
-        poll.tolerance = 5
-        RunLoop.main.add(poll, forMode: .common)
-        self.poll = poll
     }
 
     private func stop() {
@@ -387,12 +405,11 @@ final class SettingsSync {
         pendingWrite = nil
         watcher?.cancel()
         watcher = nil
-        poll?.invalidate()
-        poll = nil
         agreed = nil
         startedWith = nil
         absentSince = nil
         mayWrite = false
+        launchHoldUntil = nil
         lastError = nil
         lastModified = nil
     }
@@ -419,7 +436,7 @@ final class SettingsSync {
             watcher?.cancel()
             watcher = nil
             guard isRunning else { return }
-            try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
             watch(folder)
         }
         _ = readRemote()
@@ -429,10 +446,22 @@ final class SettingsSync {
         guard isRunning else { return }
         pendingWrite?.cancel()
         let work = DispatchWorkItem { [weak self] in
-            MainActor.assumeIsolated { self?.writeNow() }
+            MainActor.assumeIsolated { self?.push() }
         }
         pendingWrite = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1, execute: work)
+        let delay = max(1, launchHoldUntil?.timeIntervalSinceNow ?? 0)
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+    }
+
+    /// The first push after launch looks at the file again, so the write is built on what iCloud has
+    /// by now. A file still downloading answers `.pending`, and the write waits for it.
+    private func push() {
+        if launchHoldUntil != nil {
+            launchHoldUntil = nil
+            lastModified = nil
+            guard readRemote() != .pending else { return }
+        }
+        writeNow()
     }
 
     private func writeNow() {
@@ -442,7 +471,7 @@ final class SettingsSync {
         do {
             // The folder can be deleted in Finder while sync is on; without it every write fails.
             try FileManager.default.createDirectory(
-                at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+                at: url.deletingLastPathComponent(), withIntermediateDirectories: false)
             try current.encoded().write(to: url, options: .atomic)
             agreed = current
             lastModified = Self.modified(url)
@@ -482,6 +511,9 @@ final class SettingsSync {
                 let since = absentSince ?? .now
                 absentSince = since
                 guard Date.now.timeIntervalSince(since) >= Self.absentGrace else { return .pending }
+                // Forgotten, so the write is not skipped as "nothing changed" when the remembered
+                // agreement equals the settings: the file is gone, whatever was agreed.
+                agreed = nil
                 mayWrite = true
                 scheduleWrite()
                 return .absent
@@ -505,6 +537,14 @@ final class SettingsSync {
                     MainActor.assumeIsolated { self?.isFetching = false }
                 }
             }
+            return .pending
+        }
+        // Present is not current: iCloud can leave an older copy in place while it fetches the
+        // newer. Adopting it, or writing over it, is what makes another Mac's edits read as reverted.
+        let status = try? url.resourceValues(forKeys: [.ubiquitousItemDownloadingStatusKey])
+            .ubiquitousItemDownloadingStatus
+        if let status, status != .current {
+            try? fm.startDownloadingUbiquitousItem(at: url)
             return .pending
         }
         let modified = Self.modified(url)

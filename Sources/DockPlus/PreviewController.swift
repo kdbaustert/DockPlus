@@ -114,7 +114,7 @@ final class PreviewController {
             // The system prompt the first time; the pointer to Settings each time after.
             WindowCapture.askForPermissionOnce()
             if !WindowCapture.canCapture {
-                present(AnyView(PermissionStrip()), at: anchor)
+                present({ _ in PermissionStrip() }, at: anchor)
             }
             return
         }
@@ -140,24 +140,25 @@ final class PreviewController {
                 orderOutPanel()
                 return
             }
-            let strip = PreviewStrip(
-                thumbs: thumbs, showsControls: settings.previewShowsControls,
-                raise: { [weak self] id in
-                    WindowActions.raise(id, pid: pid)
-                    self?.hide()
-                },
-                close: { [weak self] id in
-                    WindowActions.close(id, pid: pid)
-                    // The window needs a moment to go; then what is left is re-captured.
-                    Task { [weak self] in
-                        try? await Task.sleep(for: .milliseconds(450))
-                        guard let self, shownItemID == item.id else { return }
-                        shownItemID = nil
-                        show(item, at: anchor)
-                    }
+            let raise: (CGWindowID) -> Void = { [weak self] id in
+                WindowActions.raise(id, pid: pid)
+                self?.hide()
+            }
+            let close: (CGWindowID) -> Void = { [weak self] id in
+                WindowActions.close(id, pid: pid)
+                // The window needs a moment to go; then what is left is re-captured.
+                Task { [weak self] in
+                    try? await Task.sleep(for: .milliseconds(450))
+                    guard let self, shownItemID == item.id else { return }
+                    shownItemID = nil
+                    show(item, at: anchor)
                 }
-            )
-            present(AnyView(strip), at: anchor)
+            }
+            present({ width in
+                PreviewStrip(
+                    thumbs: thumbs, showsControls: settings.previewShowsControls, width: width,
+                    raise: raise, close: close)
+            }, at: anchor)
             startRefresh(item, at: anchor)
         }
     }
@@ -209,8 +210,11 @@ final class PreviewController {
         refreshTimer = timer
     }
 
-    private func present(_ view: AnyView, at anchor: DockAnchor) {
-        host.rootView = view
+    /// `make` is given the width to fit, nil for the view's own. Both are the same view type, so a
+    /// strip that has to narrow is updated in place; swapping the root for a wrapper tore it down
+    /// twice on every live refresh.
+    private func present(_ make: (CGFloat?) -> some View, at anchor: DockAnchor) {
+        host.rootView = AnyView(make(nil))
         let visible = (clampScreen ?? NSScreen.screens.first)?.visibleFrame
         var size = host.fittingSize
         // Enough windows outgrow the screen, and a panel wider than `visible` slid its left edge
@@ -218,7 +222,7 @@ final class PreviewController {
         // and, narrower, they are shorter: measured again at that width, or the strip sat centred
         // in a panel as tall as the full-width one, with a gap under it.
         if let visible, case let room = anchor.maxWidth(within: visible), size.width > room {
-            host.rootView = AnyView(view.frame(width: room))
+            host.rootView = AnyView(make(room))
             size = NSSize(width: room, height: host.fittingSize.height)
         }
         panel.setFrame(anchor.frame(for: size, within: visible), display: true)
@@ -231,6 +235,8 @@ final class PreviewController {
 private struct PreviewStrip: View {
     let thumbs: [WindowThumb]
     let showsControls: Bool
+    /// Narrower than the strip's own width when there are more windows than fit.
+    let width: CGFloat?
     let raise: (CGWindowID) -> Void
     let close: (CGWindowID) -> Void
 
@@ -278,6 +284,7 @@ private struct PreviewStrip: View {
         .padding(12)
         .glassEffect(.regular, in: .rect(cornerRadius: 16))
         .padding(4)
+        .frame(width: width)
     }
 }
 

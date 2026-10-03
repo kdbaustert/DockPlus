@@ -194,15 +194,17 @@ final class DockController {
         grid.close()
     }
 
-    /// The window list of the app whose menu just opened — the hovered one, which is the one
-    /// right-clicked. SwiftUI shows a reopened menu as it built it last, and asks for the list only
-    /// when it builds it, so a window closed since stayed listed. Only this app's: rebuilding every
-    /// cached menu would queue an Accessibility query per app ahead of the one being opened.
+    /// The menu that just opened — the hovered item's, which is the one right-clicked — is built
+    /// again, with its window list asked for afresh. SwiftUI shows a reopened menu as it built it
+    /// last, and asks for the list only when it builds it, so a window closed since stayed listed.
+    /// Only this item's: rebuilding every cached menu would queue an Accessibility query per app
+    /// ahead of the one being opened, and re-read the login items and Spaces for each.
     private func refreshMenuWindows() {
         guard let id = hoveredItemID, let item = model.items.first(where: { $0.id == id }),
-              item.kind == .app, item.isRunning, let pid = item.pid
+              item.kind == .app
         else { return }
-        model.requestMenuWindows(for: pid)
+        model.menuOpened(id)
+        if item.isRunning, let pid = item.pid { model.requestMenuWindows(for: pid) }
     }
 
     private func layoutPanel() {
@@ -276,16 +278,18 @@ final class DockController {
         }
         let layout = model.layout(for: state)
         let metrics = layout.metrics
+        let reach = barReach(layout)
         // On a full-screen app's Space the bar is not there: the pointer along the bottom of a video
         // polled at display rate, laying out and previewing a bar no one could see.
         let atEdge = along >= 0 && along <= state.stripLength && across >= -1
         // The cache can miss an update — the notifications can fire before the window server has
         // moved the panel when a full-screen Space ends, and false would then stick: a dock that
         // looks dead until the next app switch. So a pointer at the edge of a bar the cache says is
-        // absent re-asks; the cost lands only on the state the re-ask is there to correct.
-        if atEdge, !isOnActiveSpace { refreshActiveSpace() }
+        // absent re-asks; the cost lands only on the state the re-ask is there to correct — and only
+        // within the bar's reach, since a pointer along the bottom of a full-screen video is not
+        // going for the dock and would otherwise pay a window-server round trip on every slow tick.
+        if atEdge, !isOnActiveSpace, across <= reach { refreshActiveSpace() }
         let onEdge = isOnActiveSpace && atEdge
-        let reach = barReach(layout)
         let overBar = onEdge && !state.isHidden
             && along >= layout.start && along <= layout.start + layout.length && across <= reach
 
@@ -355,7 +359,10 @@ final class DockController {
         // every click on an icon — the fast poll ran forever, reading a pointer that had not moved;
         // now it drops to 10 Hz, and off the bar from there to idle. The first move back costs up
         // to one slow tick before the rate returns.
-        let nearZone = state.isHidden ? 20 : metrics.magnifiedSize + 2 * metrics.padding + 40
+        // With approach on, the whole ramp (3 reach) animates at display rate, not just its inner half.
+        let approachZone = settings.magnifyOnApproach && settings.magnifies ? reach * 3 : 0
+        let nearZone = state.isHidden ? 20
+            : max(metrics.magnifiedSize + 2 * metrics.padding + 40, approachZone)
         // Throughout a drag too, so a tap of Esc is not missed between slow ticks; see `trackDrag`.
         let fast = model.drag != nil
             || (onEdge && across < nearZone && !inGrid && stillTicks < Self.slowAfterStillTicks)
@@ -384,7 +391,7 @@ final class DockController {
     private func canIdle() -> Bool {
         stillTicks >= Self.idleAfterStillTicks && NSEvent.pressedMouseButtons == 0
             && leftBarAt == nil && edgeHeldAt == nil && openMenus == 0 && !previews.isActive
-            && state.pointer == nil && model.drag == nil
+            && !state.isOverBar && model.drag == nil
     }
 
     /// A drag from the bar: the gap follows the pointer along it. SwiftUI reports no end to a drag,

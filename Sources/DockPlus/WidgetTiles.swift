@@ -41,7 +41,9 @@ struct NowPlayingTile: View {
         .contentShape(Rectangle())
         .onTapGesture {
             if widgets.trackTitle == nil, widgets.deniedPlayer != nil {
-                openAutomationSettings()
+                // Never asked: the click may put the consent prompt up. Refused: macOS will not
+                // re-prompt, so System Settings is the only door.
+                widgets.playerNeedsConsent ? widgets.allowPlayers() : openAutomationSettings()
             } else {
                 widgets.playPause()
             }
@@ -58,7 +60,11 @@ struct NowPlayingTile: View {
             Button("Next Track") { widgets.nextTrack() }
             Button("Previous Track") { widgets.previousTrack() }
             if widgets.deniedPlayer != nil {
-                Button("Open Automation Settings…") { openAutomationSettings() }
+                if widgets.playerNeedsConsent {
+                    Button("Allow Control…") { widgets.allowPlayers() }
+                } else {
+                    Button("Open Automation Settings…") { openAutomationSettings() }
+                }
             }
             Divider()
             // The same setting as Settings ▸ Widgets ▸ Now playing.

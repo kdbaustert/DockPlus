@@ -46,6 +46,23 @@ extension DockModel {
         }
     }
 
+    /// The pid and each ordinary window of the app with whether it is on screen, from the window
+    /// server alone: no round trip to the app, and no Screen Recording needed for ids and flags.
+    /// Compared beat to beat to tell whether the app's windows could have been minimized or restored.
+    nonisolated static func windowSignature(of pid: pid_t?) -> [Int] {
+        guard let pid,
+              let info = CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]]
+        else { return [] }
+        let windows = info.compactMap { window -> Int? in
+            guard window[kCGWindowOwnerPID as String] as? pid_t == pid,
+                  window[kCGWindowLayer as String] as? Int == 0,
+                  let number = window[kCGWindowNumber as String] as? Int
+            else { return nil }
+            return number << 1 | ((window[kCGWindowIsOnscreen as String] as? Bool) == true ? 1 : 0)
+        }
+        return [Int(pid)] + windows.sorted()
+    }
+
     /// One app's minimized windows. Off the main thread; see `axQueue`.
     private nonisolated static func minimizedWindows(of pid: pid_t) -> [MinimizedWindow] {
         guard let windows = WindowActions.windows(of: pid) else { return [] }
