@@ -470,8 +470,12 @@ final class SettingsSync {
         guard current != agreed else { return }
         do {
             // The folder can be deleted in Finder while sync is on; without it every write fails.
-            try FileManager.default.createDirectory(
-                at: url.deletingLastPathComponent(), withIntermediateDirectories: false)
+            // Created only when absent: with no intermediates, creating an existing folder throws
+            // rather than passing, which failed every write after the first.
+            let folder = url.deletingLastPathComponent()
+            if !FileManager.default.fileExists(atPath: folder.path) {
+                try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+            }
             try current.encoded().write(to: url, options: .atomic)
             agreed = current
             lastModified = Self.modified(url)
