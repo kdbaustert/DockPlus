@@ -652,12 +652,13 @@ final class DockController {
             return
         }
         guard missionControlTimer == nil else { return }
-        // About an eighth of a second: Mission Control's backdrop was readable within ~110 ms of the
-        // gesture in testing, and its own fade covers the rest.
-        let timer = Timer(timeInterval: 0.13, repeats: true) { [weak self] _ in
+        // A fifth of a second: the backdrop was readable within ~110 ms of the gesture in testing,
+        // and Mission Control's own fade covers the gap before the panel drops. This runs the whole
+        // time the bar is on screen, so the rate is kept as slow as the peek it would allow.
+        let timer = Timer(timeInterval: 0.2, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.refreshMissionControl() }
         }
-        timer.tolerance = 0.02
+        timer.tolerance = 0.05
         RunLoop.main.add(timer, forMode: .common)
         missionControlTimer = timer
         refreshMissionControl()
@@ -671,12 +672,26 @@ final class DockController {
         // Window-server coordinates: origin at the primary display's top left, y down.
         let display = CGRect(
             x: frame.minX, y: primary.frame.maxY - frame.maxY, width: frame.width, height: frame.height)
-        let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] ?? []
+        let windows = Self.onScreenWindows()
         let active = Self.missionControlActive(
             over: display, dockLevel: Int(CGWindowLevelForKey(.dockWindow)),
             windows: windows, ownPID: ProcessInfo.processInfo.processIdentifier)
         guard active != hiddenForMissionControl else { return }
         setHiddenForMissionControl(active)
+    }
+
+    /// The on-screen window list, held for a tenth of a second so the per-display docks share one
+    /// copy rather than each taking the whole system's windows on the same beat. `.excludeDesktopElements`
+    /// leaves out the wallpaper and desktop icons — the Mission Control backdrop is a Dock-level
+    /// window, well above them, so it still shows. Shorter than the poll interval, so each beat still
+    /// reads fresh.
+    private static var windowScan: (at: Date, windows: [[String: Any]])?
+    private static func onScreenWindows() -> [[String: Any]] {
+        if let scan = windowScan, Date().timeIntervalSince(scan.at) < 0.1 { return scan.windows }
+        let windows = CGWindowListCopyWindowInfo(
+            [.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+        windowScan = (Date(), windows)
+        return windows
     }
 
     /// Hides or shows the panel for Mission Control by its alpha, not by ordering it out: the frame
