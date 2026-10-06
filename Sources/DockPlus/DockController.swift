@@ -45,6 +45,12 @@ final class DockController {
     /// with "only when a window overlaps" on. See `refreshOverlap`.
     private var isOverlapped = false
     private var overlapTimer: Timer?
+    /// The beat that watches for Mission Control while the panel is on screen; see `refreshMissionControl`.
+    private var missionControlTimer: Timer?
+    /// Whether the panel is hidden because Mission Control (or Exposé) is up. The real Dock, still
+    /// running under DockPlus, draws its own bar over Mission Control whatever its auto-hide says,
+    /// and DockPlus's panel would otherwise show beneath it.
+    private var hiddenForMissionControl = false
     /// On NSWorkspace's own centre, so kept apart from `observers` for removal.
     private var workspaceObservers: [NSObjectProtocol] = []
     /// False while the panel's Space is not in front — a full-screen app's, where the panel, as the
@@ -112,6 +118,7 @@ final class DockController {
         trackSettings()
         setPolling(fast: false)
         updateOverlapWatch()
+        updateMissionControlWatch()
         // Not left at its assumed true: controllers are rebuilt on display changes, which can land
         // while a full-screen Space is up — waking the display mid-video — and a new one would run
         // magnification and previews for a bar no one can see until the next app or Space change.
@@ -126,6 +133,8 @@ final class DockController {
         timer = nil
         overlapTimer?.invalidate()
         overlapTimer = nil
+        missionControlTimer?.invalidate()
+        missionControlTimer = nil
         disarmMonitors()
         for observer in observers { NotificationCenter.default.removeObserver(observer) }
         observers = []
@@ -163,6 +172,7 @@ final class DockController {
             setPolling(fast: false)
         }
         updateOverlapWatch()
+        updateMissionControlWatch()
     }
 
     /// Whether the pointer is on this dock's display — the dock a click on a stack came from.
@@ -524,10 +534,18 @@ final class DockController {
         // The speed settings are multipliers on the stock quarter-second-ish slide.
         let speed = max(hidden ? settings.hideSpeed : settings.revealSpeed, 0.1)
         withAnimation(.easeInOut(duration: 0.2 / speed)) { state.isHidden = hidden }
+        // A slid-away bar has nothing to show through Mission Control, and a revealed one does, so
+        // the watch follows the slide — see `watchesMissionControl`.
+        updateMissionControlWatch()
     }
 
     private func refreshActiveSpace() {
-        isOnActiveSpace = panel.isOnActiveSpace
+        let onActiveSpace = panel.isOnActiveSpace
+        guard onActiveSpace != isOnActiveSpace else { return }
+        isOnActiveSpace = onActiveSpace
+        // A full-screen Space has no DockPlus bar to hide, so the watch stops there and resumes when
+        // an ordinary Space comes back.
+        updateMissionControlWatch()
     }
 
     // MARK: - Overlap
@@ -607,6 +625,87 @@ final class DockController {
             else { return false }
             let overlap = bar.intersection(bounds)
             return !overlap.isNull && overlap.width >= 1 && overlap.height >= 1
+        }
+    }
+
+    // MARK: - Mission Control
+
+    /// Mission Control draws the real Dock over the whole screen whatever its auto-hide setting, so
+    /// the moment DockPlus's panel would show beneath it is exactly while that panel is on screen:
+    /// the display awake, an ordinary Space in front, and the bar not slid away. Off otherwise, the
+    /// poll it drives costs nothing when there is nothing to cover.
+    private var watchesMissionControl: Bool {
+        !isPaused && isOnActiveSpace && !state.isHidden
+    }
+
+    /// Starts or stops the beat that catches Mission Control. No Accessibility, distributed or
+    /// SkyLight notification was found to fire on a Mission Control transition (measured 2026-10-06),
+    /// so a short poll of the on-screen window list is the only signal — gated to when the panel is
+    /// actually on screen, per `watchesMissionControl`.
+    private func updateMissionControlWatch() {
+        guard watchesMissionControl else {
+            missionControlTimer?.invalidate()
+            missionControlTimer = nil
+            // Nothing invisible left behind: a panel hidden for Mission Control when the watch stops
+            // — paused, slid away, its Space gone — would never come back otherwise.
+            if hiddenForMissionControl { setHiddenForMissionControl(false) }
+            return
+        }
+        guard missionControlTimer == nil else { return }
+        // About an eighth of a second: Mission Control's backdrop was readable within ~110 ms of the
+        // gesture in testing, and its own fade covers the rest.
+        let timer = Timer(timeInterval: 0.13, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.refreshMissionControl() }
+        }
+        timer.tolerance = 0.02
+        RunLoop.main.add(timer, forMode: .common)
+        missionControlTimer = timer
+        refreshMissionControl()
+    }
+
+    /// Reads the on-screen windows and hides or shows the panel to match Mission Control. Scoped to
+    /// this dock's own display: with "Displays have separate Spaces" the backdrop is per display.
+    private func refreshMissionControl() {
+        guard let screen = self.screen, let primary = NSScreen.screens.first else { return }
+        let frame = screen.frame
+        // Window-server coordinates: origin at the primary display's top left, y down.
+        let display = CGRect(
+            x: frame.minX, y: primary.frame.maxY - frame.maxY, width: frame.width, height: frame.height)
+        let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] ?? []
+        let active = Self.missionControlActive(
+            over: display, dockLevel: Int(CGWindowLevelForKey(.dockWindow)),
+            windows: windows, ownPID: ProcessInfo.processInfo.processIdentifier)
+        guard active != hiddenForMissionControl else { return }
+        setHiddenForMissionControl(active)
+    }
+
+    /// Hides or shows the panel for Mission Control by its alpha, not by ordering it out: the frame
+    /// and layering stay put and `isVisible` stays true, so the pointer poll and previews read the
+    /// panel unchanged. Instant, with no animation — Mission Control's own fade is quick, and a slide
+    /// here would trail behind it.
+    private func setHiddenForMissionControl(_ hidden: Bool) {
+        hiddenForMissionControl = hidden
+        panel.alphaValue = hidden ? 0 : 1
+    }
+
+    /// Whether Mission Control (or Exposé) is drawing over `display`: the real Dock, auto-hidden to
+    /// an edge the rest of the time, puts up a window the size of the whole display at the Dock
+    /// window level while it is up. Matched by level and size, not by owner name, which needs Screen
+    /// Recording. Everything in window-server coordinates. Pure, for the tests.
+    nonisolated static func missionControlActive(
+        over display: CGRect, dockLevel: Int, windows: [[String: Any]], ownPID: pid_t
+    ) -> Bool {
+        windows.contains { info in
+            guard info[kCGWindowLayer as String] as? Int == dockLevel,
+                  let pid = info[kCGWindowOwnerPID as String] as? Int, pid != Int(ownPID),
+                  let bounds = (info[kCGWindowBounds as String] as? NSDictionary)
+                      .flatMap({ CGRect(dictionaryRepresentation: $0) })
+            else { return false }
+            // The backdrop covers the display; the menu-bar inset keeps it a touch short of the full
+            // height, so most-of-the-screen is the test, which no ordinary Dock-level window meets.
+            let overlap = display.intersection(bounds)
+            return !overlap.isNull && overlap.width >= display.width - 2
+                && overlap.height >= display.height * 0.9
         }
     }
 }
