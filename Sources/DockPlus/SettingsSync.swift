@@ -62,6 +62,9 @@ struct PortableSettings: Codable, Equatable {
     /// The switch only. The list it shows stays on each Mac; see `DockSettings.recentApps`.
     var showsRecentApps: Bool?
 
+    /// Whether the file carried none of the settings this build knows.
+    var isEmpty: Bool { self == PortableSettings() }
+
     func encoded() throws -> Data {
         let encoder = JSONEncoder()
         // Sorted, so the same settings always produce the same bytes and an unchanged file is
@@ -246,7 +249,11 @@ enum SettingsFile {
         panel.allowsMultipleSelection = false
         guard panel.runModal() == .OK, let url = panel.url else { return }
         do {
-            settings.apply(try PortableSettings.decoded(from: Data(contentsOf: url)))
+            let imported = try PortableSettings.decoded(from: Data(contentsOf: url))
+            // Every field is optional, so any JSON object decodes; one with no setting in it is
+            // some other file, and applying it would do nothing without saying so.
+            guard !imported.isEmpty else { throw CocoaError(.fileReadCorruptFile) }
+            settings.apply(imported)
         } catch {
             let alert = NSAlert()
             alert.messageText = "That file isn't a DockPlus settings file."
@@ -345,6 +352,13 @@ final class SettingsSync {
             self?.followSwitch()
         }
         followSwitch()
+        // Just after wake the file can still read as current while iCloud has newer on the way, so
+        // the launch hold starts over and the next read looks afresh.
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.holdAfterWake() }
+        }
         observeContinuously(ownedBy: self) { [settings] in
             _ = settings.portable
         } onChange: { [weak self] in
@@ -353,7 +367,10 @@ final class SettingsSync {
     }
 
     private func followSwitch() {
-        settings.syncsWithICloud && Self.isAvailable ? start() : stop()
+        // The agreed baseline is forgotten only when the user turned sync off. iCloud going away
+        // stops the work but keeps it, so edits made meanwhile are merged, not reverted, when it
+        // returns.
+        settings.syncsWithICloud && Self.isAvailable ? start() : stop(forgetAgreement: !settings.syncsWithICloud)
         // The poll lives as long as the switch is on, not as long as sync runs: iCloud Drive turned
         // on after launch is only noticed by something still looking.
         guard settings.syncsWithICloud else {
@@ -365,6 +382,7 @@ final class SettingsSync {
         let poll = Timer(timeInterval: 30, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
                 self?.followSwitch()
+                self?.watchIfNeeded()
                 _ = self?.readRemote()
             }
         }
@@ -379,9 +397,6 @@ final class SettingsSync {
         startedWith = settings.portable
         agreed = Self.loadAgreed()
         launchHoldUntil = .now + Self.absentGrace
-        // No intermediate directories: with iCloud Drive signed out they would rebuild a local
-        // com~apple~CloudDocs that is not iCloud's.
-        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
         // Turning sync on adopts what another Mac already put there; only an empty iCloud gets this
         // Mac's settings, and only once it has stayed empty for a while — `readRemote` writes them
         // then. A file that is not readable yet is left alone: the watcher and the poll read it again
@@ -395,17 +410,20 @@ final class SettingsSync {
             // since — measured: an old "magnifiedSize" file reset the Amount slider on each launch.
             scheduleWrite()
         }
+        // The folder is not created here: on a Mac new to iCloud Drive the server's own DockPlus/
+        // can still be listing, and a local one made first becomes "DockPlus 2". `writeNow` creates
+        // it after `readRemote`'s grace; until a folder exists the poll watches for it.
         watch(folder)
     }
 
-    private func stop() {
+    private func stop(forgetAgreement: Bool) {
         guard isRunning else { return }
         isRunning = false
         pendingWrite?.cancel()
         pendingWrite = nil
         watcher?.cancel()
         watcher = nil
-        agreed = nil
+        if forgetAgreement { agreed = nil }
         startedWith = nil
         absentSince = nil
         mayWrite = false
@@ -415,6 +433,7 @@ final class SettingsSync {
     }
 
     private func watch(_ folder: URL) {
+        // No folder yet, so nothing to watch; `watchIfNeeded` tries again on the poll.
         let descriptor = open(folder.path, O_EVTONLY)
         guard descriptor >= 0 else { return }
         let source = DispatchSource.makeFileSystemObjectSource(
@@ -431,15 +450,27 @@ final class SettingsSync {
 
     private func folderChanged(_ folder: URL, events: DispatchSource.FileSystemEvent) {
         // The folder itself was deleted or moved: the descriptor now names a dead inode and would
-        // never fire again, so watch the path afresh, re-creating the folder if it is gone.
+        // never fire again, so watch the path afresh. A folder that is gone stays unwatched until
+        // the poll or the next write brings it back.
         if events.contains(.delete) || events.contains(.rename) {
             watcher?.cancel()
             watcher = nil
             guard isRunning else { return }
-            try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
             watch(folder)
         }
         _ = readRemote()
+    }
+
+    private func holdAfterWake() {
+        guard isRunning else { return }
+        launchHoldUntil = .now + Self.absentGrace
+        lastModified = nil
+        _ = readRemote()
+    }
+
+    private func watchIfNeeded() {
+        guard isRunning, watcher == nil, let folder = Self.folderURL else { return }
+        watch(folder)
     }
 
     private func scheduleWrite() {
@@ -468,6 +499,14 @@ final class SettingsSync {
         guard isRunning, mayWrite, let url = Self.fileURL else { return }
         let current = settings.portable
         guard current != agreed else { return }
+        // Past the launch hold the file can still go stale (iCloud mid-download, a wake). Writing
+        // over it is what reverts another Mac's edits, so ask for the copy and wait. `lastModified`
+        // is forgotten so the next read looks even if the timestamp has not moved; adopting what
+        // lands reschedules this write whenever the settings here still differ.
+        if Self.isRemoteStale(url) {
+            lastModified = nil
+            return
+        }
         do {
             // The folder can be deleted in Finder while sync is on; without it every write fails.
             // Created only when absent: with no intermediates, creating an existing folder throws
@@ -475,6 +514,7 @@ final class SettingsSync {
             let folder = url.deletingLastPathComponent()
             if !FileManager.default.fileExists(atPath: folder.path) {
                 try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+                watchIfNeeded()
             }
             try current.encoded().write(to: url, options: .atomic)
             agreed = current
@@ -484,6 +524,23 @@ final class SettingsSync {
             NSLog("DockPlus: could not write iCloud settings: \(error)")
             lastError = error.localizedDescription
         }
+    }
+
+    /// Whether the file in iCloud is one a write must not replace: evicted, a placeholder, or present
+    /// but not the current version. Absent is not stale; a missing file is written like any other.
+    private static func isRemoteStale(_ url: URL) -> Bool {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: url.path) else {
+            return fm.fileExists(
+                atPath: url.deletingLastPathComponent().appendingPathComponent(".settings.json.icloud").path)
+        }
+        var info = stat()
+        let isDataless = stat(url.path, &info) == 0 && info.st_flags & UInt32(SF_DATALESS) != 0
+        let status = try? url.resourceValues(forKeys: [.ubiquitousItemDownloadingStatusKey])
+            .ubiquitousItemDownloadingStatus
+        guard isDataless || (status != nil && status != .current) else { return false }
+        try? fm.startDownloadingUbiquitousItem(at: url)
+        return true
     }
 
     enum ReadResult { case adopted, unchanged, absent, pending }

@@ -32,6 +32,7 @@ extension WidgetsModel {
             playerNotices = nil
             trackTitle = nil
             deniedPlayer = nil
+            unaskedPlayer = nil
             playerNeedsConsent = false
             watchPlayerAccess()
             clearArtwork()
@@ -66,22 +67,22 @@ extension WidgetsModel {
             // A paused one shows only when nothing plays, and the first playing one ends the search.
             var shown: (app: String, parts: [String])?
             var denied: String?
-            var neverAsked = false
+            var unasked: String?
+            // Every running player is checked before any is scripted: the first one playing ends
+            // the search below, and a player after it would otherwise never be asked, nor noticed
+            // as waiting to be. Asked before the script, not left to osascript: an unanswered
+            // consent prompt outlives the script's 3 s timeout and left "Nothing Playing" up after
+            // a yes. Off the main thread, because a prompt blocks until it is answered.
+            var allowed: [(name: String, bundleID: String)] = []
             for player in apps {
-                let app = player.name
-                // Asked before the script, not left to osascript: an unanswered consent prompt
-                // outlives the script's 3 s timeout and left "Nothing Playing" up after a yes. Off
-                // the main thread, because a prompt blocks until it is answered.
                 switch await Self.automationStatus(of: player.bundleID, asking: askingConsent) {
-                case OSStatus(errAEEventWouldRequireUserConsent):
-                    if denied == nil { neverAsked = true }
-                    denied = denied ?? app
-                    continue
-                case OSStatus(errAEEventNotPermitted):
-                    denied = denied ?? app
-                    continue
-                default: break
+                case OSStatus(errAEEventWouldRequireUserConsent): unasked = unasked ?? player.name
+                case OSStatus(errAEEventNotPermitted): denied = denied ?? player.name
+                default: allowed.append(player)
                 }
+            }
+            for player in allowed {
+                let app = player.name
                 // The timeout bounds each Apple event a busy player sits on; the process kill in
                 // runAppleScript backs it up should osascript hang anyway.
                 let script = """
@@ -123,8 +124,10 @@ extension WidgetsModel {
             }
             // Switched off while the poll ran: configurePlayer has already cleared the tile.
             guard settings.showsNowPlaying, widgetsOnBar else { return }
-            deniedPlayer = shown == nil ? denied : nil
-            playerNeedsConsent = deniedPlayer != nil && neverAsked
+            let consent = Self.consentState(shown: shown != nil, denied: denied, unasked: unasked)
+            deniedPlayer = consent.denied
+            playerNeedsConsent = consent.needsConsent
+            unaskedPlayer = unasked
             watchPlayerAccess()
             guard let shown else {
                 trackTitle = nil
@@ -143,12 +146,25 @@ extension WidgetsModel {
         }
     }
 
+    /// What the tile says about permission, from what the poll found. A refused or never-asked
+    /// player is only the tile's problem when nothing else answered, but a never-asked one is kept
+    /// out of that rule by `unaskedPlayer`: another player showing must not hide that this one
+    /// cannot be reached. When nothing shows, a never-asked player outranks a refused one, since a
+    /// click can still ask about it while System Settings does not list it.
+    nonisolated static func consentState(
+        shown: Bool, denied: String?, unasked: String?
+    ) -> (denied: String?, needsConsent: Bool) {
+        guard !shown else { return (nil, false) }
+        return (unasked ?? denied, unasked != nil)
+    }
+
     /// Automation granted in System Settings announces nothing, and a paused player sends no notice
     /// to poll on, so the tile stayed on Not Allowed until the track changed. As the calendar's
     /// access watch: while a player is refused, each app switch asks TCC again — one question, no
-    /// prompt, and no osascript launched to ask it — and polls once the answer is yes.
+    /// prompt, and no osascript launched to ask it — and polls once the answer is yes. A player
+    /// never asked is watched the same way: allowing it from Settings needs no click on the tile.
     private func watchPlayerAccess() {
-        guard deniedPlayer != nil else {
+        guard deniedPlayer != nil || unaskedPlayer != nil else {
             if let playerAccessWatch { NSWorkspace.shared.notificationCenter.removeObserver(playerAccessWatch) }
             playerAccessWatch = nil
             return
@@ -158,11 +174,10 @@ extension WidgetsModel {
             forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main
         ) { [weak self] _ in
             MainActor.assumeIsolated {
-                guard let self, let denied = self.deniedPlayer,
-                      let bundleID = Self.players.first(where: { $0.name == denied })?.bundleID,
-                      Self.mayScript(bundleID)
-                else { return }
-                self.pollPlayer()
+                guard let self else { return }
+                let waiting = Set([self.deniedPlayer, self.unaskedPlayer].compactMap { $0 })
+                let granted = Self.players.contains { waiting.contains($0.name) && Self.mayScript($0.bundleID) }
+                if granted { self.pollPlayer() }
             }
         }
     }
@@ -214,14 +229,24 @@ extension WidgetsModel {
             return
         }
         Pending.artwork = Task { [weak self] in
-            let data = try? await URLSession.shared.data(from: remote).0
+            let data = try? await URLSession.shared.data(from: remote)
+            // Decoded here (a pure function); nil for an error page that got through as a "download".
+            let image = data.flatMap { Self.isSuccess($0.1) ? Self.thumbnail(of: $0.0) : nil }
             // Cancelled means replaced or cleared: whatever this download found is not the tile's.
             guard let self, !Task.isCancelled else { return }
             // A failed download clears rather than keeping the previous track's cover under this
-            // one — URL included, so the next poll tries the download again.
-            guard let data else { return clearArtwork() }
-            artwork = Self.thumbnail(of: data)
+            // one — URL included, so the next poll tries the download again. Failed includes a
+            // non-2xx answer (URLSession throws only on transport errors) and a body that is not
+            // an image, such as a captive portal's page.
+            guard let image else { return clearArtwork() }
+            artwork = image
         }
+    }
+
+    /// URLSession hands back a 404, a 5xx or a captive portal's page as an ordinary result.
+    nonisolated static func isSuccess(_ response: URLResponse) -> Bool {
+        guard let http = response as? HTTPURLResponse else { return false }
+        return (200..<300).contains(http.statusCode)
     }
 
     /// Decoded at the tile's size rather than the source's: Spotify's covers are 640 px, about

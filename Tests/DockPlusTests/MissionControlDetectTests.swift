@@ -9,20 +9,23 @@ final class MissionControlDetectTests: XCTestCase {
     private let display = CGRect(x: 0, y: 0, width: 1440, height: 900)
     private let dockLevel = 20
     private let me: pid_t = 100
+    private let dock: pid_t = 200
 
     private func window(
-        _ bounds: CGRect, pid: Int = 200, layer: Int = 20
+        _ bounds: CGRect, pid: Int = 200, layer: Int = 20, alpha: Double? = nil
     ) -> [String: Any] {
-        [
+        var info: [String: Any] = [
             kCGWindowBounds as String: bounds.dictionaryRepresentation,
             kCGWindowOwnerPID as String: pid,
             kCGWindowLayer as String: layer,
         ]
+        if let alpha { info[kCGWindowAlpha as String] = alpha }
+        return info
     }
 
     private func active(_ windows: [[String: Any]]) -> Bool {
         DockController.missionControlActive(
-            over: display, dockLevel: dockLevel, windows: windows, ownPID: me)
+            over: display, dockLevel: dockLevel, windows: windows, ownPID: me, dockPID: dock)
     }
 
     func testNoWindowsIsNotActive() {
@@ -81,6 +84,17 @@ final class MissionControlDetectTests: XCTestCase {
             window(display, pid: Int(me)),
             window(display),
         ]))
+    }
+
+    /// A full-display window at the Dock level from some other app is not the Dock's backdrop.
+    func testFullDisplayWindowOfAnotherAppIsNotActive() {
+        XCTAssertFalse(active([window(display, pid: 300)]))
+    }
+
+    /// An invisible backdrop shows nothing to hide from; a missing alpha reads as visible.
+    func testFullyTransparentBackdropIsNotActive() {
+        XCTAssertFalse(active([window(display, alpha: 0)]))
+        XCTAssertTrue(active([window(display, alpha: 1)]))
     }
 
     /// Entries the window server describes without the keys are skipped, not trusted.

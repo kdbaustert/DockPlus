@@ -8,10 +8,8 @@ extension WidgetsModel {
         // New instances, not a new `dateFormat` on the old ones: the per-tick formatters these
         // replace picked up a new time zone or locale for free, and this keeps that without relying
         // on whether a long-lived formatter would follow either change on its own.
-        clockTimeFormatter = DateFormatter()
-        clockTimeFormatter.dateFormat = settings.timeFormat
-        clockDateFormatter = DateFormatter()
-        clockDateFormatter.dateFormat = "EEE MMM d"
+        clockTimeFormatter = .localized(settings.timeTemplate)
+        clockDateFormatter = .localized("EEEMMMd")
         tickClock()
     }
 
@@ -38,5 +36,17 @@ extension WidgetsModel {
         timer.tolerance = 1
         RunLoop.main.add(timer, forMode: .common)
         clockTimer = timer
+    }
+}
+
+extension DateFormatter {
+    /// A formatter for a skeleton such as "Hmm" or "EEEMMMd", laid out the way the locale orders and
+    /// punctuates those fields. A fixed pattern put ko_KR's "오전" after the time and de_DE's
+    /// "Mi. Okt. 8" in an English order. The template's H or h still forces 24 or 12 hours.
+    static func localized(_ template: String, locale: Locale = .current) -> DateFormatter {
+        let formatter = DateFormatter()
+        formatter.locale = locale
+        formatter.setLocalizedDateFormatFromTemplate(template)
+        return formatter
     }
 }

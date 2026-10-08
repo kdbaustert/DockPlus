@@ -252,6 +252,43 @@ final class DockModelItemsTests: XCTestCase {
         XCTAssertEqual(DockModel.bounceRemaining(after: 1.3), 0.5, accuracy: 1e-9)
     }
 
+    /// Each display's icon rests on its own cycle boundary, wherever its bounce began.
+    func testBounceRestDelayIsPerIcon() {
+        let now = Date()
+        XCTAssertEqual(
+            DockModel.bounceRestDelay(startedAt: now - 0.7, now: now, isShown: true), 0.5, accuracy: 1e-4)
+        XCTAssertEqual(
+            DockModel.bounceRestDelay(startedAt: now - 0.1, now: now, isShown: true), 0.5, accuracy: 1e-4)
+    }
+
+    /// An icon that is not drawn, or never began, has nothing to finish.
+    func testBounceRestDelayIsZeroWhenNotShown() {
+        let now = Date()
+        XCTAssertEqual(DockModel.bounceRestDelay(startedAt: now - 0.1, now: now, isShown: false), 0)
+        XCTAssertEqual(DockModel.bounceRestDelay(startedAt: nil, now: now, isShown: true), 0)
+    }
+
+    // MARK: - queued minimized sweeps
+
+    /// A sweep skipped because one was running is not lost: it runs when that one finishes.
+    func testQueuedSweepKeepsWhatWasAskedWhileBusy() {
+        var queue = QueuedSweep()
+        XCTAssertTrue(queue.take() == nil)
+        queue.add([1])
+        queue.add([2, 1])
+        XCTAssertEqual(queue.take(), .some([1, 2]))
+        XCTAssertTrue(queue.take() == nil)
+    }
+
+    /// An every-app request swallows the targeted ones.
+    func testQueuedFullSweepWins() {
+        var queue = QueuedSweep()
+        queue.add([1])
+        queue.add(nil)
+        XCTAssertEqual(queue.take(), .some(nil))
+        XCTAssertTrue(queue.take() == nil)
+    }
+
     // MARK: - minimized-window merge
 
     func testAppsNotAskedKeepTheirPreviousWindows() {

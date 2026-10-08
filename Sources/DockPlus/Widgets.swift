@@ -38,9 +38,13 @@ final class WidgetsModel {
     /// Whether `deniedPlayer` was never asked (a click can put the consent prompt up) rather than
     /// refused (only System Settings can undo that, and macOS will not re-prompt).
     var playerNeedsConsent = false
+    /// A running player never asked, even while another one shows: `deniedPlayer` is only set when
+    /// nothing shows, so without this the tile could offer no way to allow the player that is
+    /// actually playing.
+    var unaskedPlayer: String?
     /// Which player answered last — where the controls go.
     var player: String?
-    /// Watches app switches only while a player is refused, to notice Automation being granted in
+    /// Watches app switches only while a player is refused or never asked, to notice Automation being granted in
     /// System Settings; see `watchPlayerAccess`.
     @ObservationIgnored var playerAccessWatch: NSObjectProtocol?
     @ObservationIgnored var artworkURL: String?

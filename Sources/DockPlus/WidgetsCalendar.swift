@@ -115,8 +115,7 @@ extension WidgetsModel {
         let predicate = eventStore.predicateForEvents(withStart: dayStart, end: dayEnd, calendars: nil)
         let entries = eventStore.events(matching: predicate).compactMap(CalendarEntry.init(event:))
         // The dock's times read like its clock, so the two never disagree about 24-hour time.
-        let formatter = DateFormatter()
-        formatter.dateFormat = settings.timeFormat
+        let formatter = DateFormatter.localized(settings.timeTemplate)
         let shown = Self.calendarEvent(in: entries, at: now)
         calendarTitle = shown?.title
         calendarTime = shown.map { Self.calendarTimeText(for: $0, at: now, time: formatter.string(from:)) } ?? ""

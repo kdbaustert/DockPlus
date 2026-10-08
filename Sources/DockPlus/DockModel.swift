@@ -160,10 +160,6 @@ final class DockModel {
     /// finishing 50 ms after starting, which cut the bounce off before a frame of it was drawn.
     private nonisolated static let bounceCycle: TimeInterval = 0.6
     @ObservationIgnored private var launchStarts: [String: Date] = [:]
-    /// When each bouncing icon's keyframe cycle actually began: from the launch's start, unless the
-    /// dock was hidden then, and then from the reveal. The stop is timed from here, as it only lands
-    /// on a cycle boundary counted from where the cycle began.
-    @ObservationIgnored private var bounceStarts: [String: Date] = [:]
     @ObservationIgnored private var runningObservation: NSKeyValueObservation?
     /// What the running apps looked like at the last rebuild; see the maintenance timer.
     @ObservationIgnored private var lastRunningSignature: [pid_t: URL?] = [:]
@@ -175,6 +171,8 @@ final class DockModel {
     /// activation sweep must still ask about.
     @ObservationIgnored private var lastFrontmostPID: pid_t?
     @ObservationIgnored var isSweepingMinimized = false
+    /// What sweeps were asked for while one was running, which the finished sweep runs next.
+    @ObservationIgnored var queuedSweep = QueuedSweep()
     /// Set while the minimized-window sweep is ineligible (setting off, no Accessibility), so the
     /// first sweep after it passes again asks every app instead of waiting for the 30 s full one.
     @ObservationIgnored var needsFullMinimizedSweep = false
@@ -292,12 +290,15 @@ final class DockModel {
                 // The frontmost app is asked over Accessibility only when the window server says its
                 // windows changed — that wakes the app, where the window server's list does not. A
                 // minimize or restore flips a window's on-screen flag, so it still shows within a beat.
-                // Off, the call is what clears the tiles, so it is not skipped.
+                // Off, the call is what clears the tiles, so it is not skipped; nor is the first one
+                // after it was ineligible, which asks every app whether or not the windows changed.
+                // The signature is evaluated first either way, so it stays current.
                 if self.maintenanceBeats % 15 == 0 {
                     self.lastWindowSignature = Self.windowSignature(
                         of: NSWorkspace.shared.frontmostApplication?.processIdentifier)
                     self.refreshMinimizedWindows()
-                } else if self.frontmostWindowsChanged() || !self.settings.showsMinimizedWindows {
+                } else if self.frontmostWindowsChanged() || self.needsFullMinimizedSweep
+                            || !self.settings.showsMinimizedWindows {
                     self.refreshMinimizedWindows(only: NSWorkspace.shared.frontmostApplication.map {
                         [$0.processIdentifier]
                     })
@@ -785,26 +786,20 @@ final class DockModel {
         guard launching.insert(id).inserted else { return }
         let start = Date()
         launchStarts[id] = start
+        // Ends the launch, not the bounce: each icon rests at the end of its own cycle (see DockIcon).
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.launchTimeout) { [weak self] in
             MainActor.assumeIsolated { self?.stopBouncing(id, startedAt: start) }
         }
     }
 
-    /// An icon's view started or stopped bouncing — which it does later than the launch when the dock
-    /// is hidden then, and again on every reveal after a hide.
-    func bounceChanged(_ id: String, isBouncing: Bool) {
-        if !isBouncing {
-            bounceStarts[id] = nil
-        } else if bounceStarts[id] == nil, launching.contains(id) {
-            bounceStarts[id] = Date()
-        }
-    }
-
-    /// Stops the bounce at the end of the cycle it is in — at least one whole bounce.
+    /// Ends the launch once it has run one whole cycle from its start, so every icon has been shown
+    /// at least one bounce. An icon that is mid-cycle then finishes it on its own: the docks on
+    /// several displays are revealed at different moments, so no single stop lands on all their
+    /// cycle boundaries.
     private func finishedLaunching(_ url: URL) {
         let id = Self.key(url)
         guard let start = launchStarts[id] else { return }
-        let remaining = Self.bounceRemaining(after: Date().timeIntervalSince(bounceStarts[id] ?? start))
+        let remaining = Self.bounceRemaining(after: Date().timeIntervalSince(start))
         DispatchQueue.main.asyncAfter(deadline: .now() + remaining) { [weak self] in
             MainActor.assumeIsolated { self?.stopBouncing(id, startedAt: start) }
         }
@@ -817,12 +812,19 @@ final class DockModel {
         return cycles * bounceCycle - elapsed
     }
 
+    /// How long an icon whose launch just ended, and whose current bounce began at `start`, keeps
+    /// bouncing to finish that cycle. Zero when it is not drawn (`isShown` false: the dock is hidden
+    /// or bouncing is off) or never began. Pure, for the tests.
+    nonisolated static func bounceRestDelay(startedAt start: Date?, now: Date, isShown: Bool) -> TimeInterval {
+        guard isShown, let start else { return 0 }
+        return bounceRemaining(after: now.timeIntervalSince(start))
+    }
+
     /// Only when this is still the launch it was scheduled for: a quit and relaunch inside the
     /// timeout must not have its bounce cut short by the earlier launch's timer.
     private func stopBouncing(_ id: String, startedAt start: Date) {
         guard launchStarts[id] == start else { return }
         launchStarts[id] = nil
-        bounceStarts[id] = nil
         launching.remove(id)
     }
 

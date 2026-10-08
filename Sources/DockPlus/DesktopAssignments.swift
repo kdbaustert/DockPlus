@@ -185,10 +185,19 @@ enum DesktopAssignments {
         let keys = ["Options": "OPTIONS", "All Desktops": "ALL_DESKTOPS", "This Desktop": "THIS_DESKTOP",
                     "None": "NONE"]
         let bundle = Bundle(path: "/System/Library/CoreServices/Dock.app")
+        // The language is picked here, from the user's preferences: a bundle loaded by path resolves
+        // through the main bundle's languages, and DockPlus ships only English, so
+        // `localizedString` answered in English whatever the system language.
+        let strings: [String: String] = bundle.flatMap { bundle in
+            Bundle.preferredLocalizations(from: bundle.localizations, forPreferences: Locale.preferredLanguages)
+                .first
+                .flatMap { bundle.path(forResource: "DockMenus", ofType: "strings", inDirectory: nil, forLocalization: $0) }
+                .flatMap { NSDictionary(contentsOfFile: $0) as? [String: String] }
+        } ?? [:]
         func string(_ key: String, _ arguments: [String] = []) -> String? {
-            guard let bundle else { return nil }
-            let format = bundle.localizedString(forKey: key, value: nil, table: "DockMenus")
-            return format == key ? nil : String(format: format, arguments: arguments)
+            let format = strings[key] ?? bundle?.localizedString(forKey: key, value: nil, table: "DockMenus")
+            guard let format, format != key else { return nil }
+            return String(format: format, arguments: arguments)
         }
         if let key = keys[title] { return string(key) ?? title }
         // "Desktop on Display 2", "Desktop 3", "Desktop 3 on Display 2".

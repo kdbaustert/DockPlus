@@ -137,8 +137,10 @@ final class DockSettings {
     var weatherLocation: String { didSet { store.set(weatherLocation, forKey: "weatherLocation") } }
     var weatherFahrenheit: Bool { didSet { store.set(weatherFahrenheit, forKey: "weatherFahrenheit") } }
     var clock24Hour: Bool { didSet { store.set(clock24Hour, forKey: "clock24Hour") } }
-    /// One format for every time on the bar: the clock, calendar and keep-awake widgets must never disagree.
-    var timeFormat: String { clock24Hour ? "HH:mm" : "h:mm a" }
+    /// One template for every time on the bar: the clock, calendar and keep-awake widgets must never
+    /// disagree. A template, not a pattern: the 24-hour switch picks the hour cycle and the locale
+    /// picks the rest (separator, AM/PM text and where it sits), see `DateFormatter.localized`.
+    var timeTemplate: String { clock24Hour ? "Hmm" : "hmma" }
     // Theme. An empty tint means the plain glass.
     var barTint: String { didSet { store.set(barTint, forKey: "barTint") } }
     var barTintIntensity: Double { didSet { store.set(barTintIntensity, forKey: "barTintIntensity") } }

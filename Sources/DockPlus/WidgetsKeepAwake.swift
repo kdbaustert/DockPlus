@@ -85,8 +85,7 @@ extension WidgetsModel {
             keepAwakeEnd = ""
             return
         }
-        let formatter = DateFormatter()
-        formatter.dateFormat = settings.timeFormat
+        let formatter = DateFormatter.localized(settings.timeTemplate)
         keepAwakeEnd = formatter.string(from: keepAwakeUntil)
     }
 }

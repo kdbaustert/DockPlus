@@ -274,9 +274,14 @@ private struct WeatherLocationRow: View {
         .onAppear { draft = settings.weatherLocation }
         // Switching tabs mid-edit removes the field without a focus change.
         .onDisappear(perform: commit)
-        // A change from elsewhere — sync, an import — shows, unless it would overwrite typing.
-        .onChange(of: settings.weatherLocation) { _, location in
-            if !isFocused { draft = location }
+        // A change from elsewhere — sync, an import — shows, unless it would overwrite typing. A
+        // focused field still holding the old name has not been typed in, so it follows too: left
+        // behind, `commit` wrote the old name back over the other Mac's pick and dropped its pin.
+        .onChange(of: settings.weatherLocation) { old, location in
+            guard !isFocused || draft == old else { return }
+            // Flagged like a pick: a focused field would otherwise start a search for this write.
+            isPicking = draft != location
+            draft = location
         }
         .onChange(of: draft) { _, text in
             searchTask?.cancel()

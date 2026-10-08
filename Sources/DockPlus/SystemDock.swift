@@ -34,7 +34,11 @@ enum SystemDock {
         if store.dictionary(forKey: savedKey) == nil {
             var saved: [String: Any] = [:]
             if let value = userValue("autohide") { saved["autohide"] = value }
-            if let value = userValue("autohide-delay") { saved["autohide-delay"] = value }
+            // Not DockPlus's own value: left by a crash or Keep Hidden once its prefs were wiped, it
+            // would be saved as the user's and written back by Restore Dock.
+            if let value = userValue("autohide-delay"), (value as? Double) != hiddenDelay {
+                saved["autohide-delay"] = value
+            }
             store.set(saved, forKey: savedKey)
         }
         if store.dictionary(forKey: savedBouncingKey) == nil {

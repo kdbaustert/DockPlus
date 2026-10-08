@@ -59,12 +59,10 @@ struct NowPlayingTile: View {
             Button("Play/Pause") { widgets.playPause() }
             Button("Next Track") { widgets.nextTrack() }
             Button("Previous Track") { widgets.previousTrack() }
-            if widgets.deniedPlayer != nil {
-                if widgets.playerNeedsConsent {
-                    Button("Allow Control…") { widgets.allowPlayers() }
-                } else {
-                    Button("Open Automation Settings…") { openAutomationSettings() }
-                }
+            if let unasked = widgets.unaskedPlayer {
+                Button("Allow Control of \(unasked)…") { widgets.allowPlayers() }
+            } else if widgets.deniedPlayer != nil {
+                Button("Open Automation Settings…") { openAutomationSettings() }
             }
             Divider()
             // The same setting as Settings ▸ Widgets ▸ Now playing.

@@ -103,12 +103,20 @@ private struct DockIcon: View {
     let bounceHeight: CGFloat
     let model: DockModel
     @State private var isTargeted = false
+    /// When this icon's bounce began. The model's launch is shared by every display's dock, which
+    /// are revealed at different moments, so each icon rests on its own cycle boundary, counted
+    /// from here.
+    @State private var bounceStart: Date?
+    /// The launch is over but this icon is still finishing its cycle.
+    @State private var isFinishing = false
 
     /// Never while the dock is hidden: it sits just past the screen edge, and a lift would show the
     /// icon above it on every launch anywhere.
-    private var isBouncing: Bool {
+    private var wantsBounce: Bool {
         model.settings.bouncesOnLaunch && !isDockHidden && model.launching.contains(item.id)
     }
+
+    private var isBouncing: Bool { wantsBounce || isFinishing }
 
     var body: some View {
         Image(nsImage: model.icon(for: item))
@@ -137,9 +145,35 @@ private struct DockIcon: View {
                     LinearKeyframe(0, duration: 0.3, timingCurve: .easeIn)
                 }
             }
-            // Where the stop is timed from; see `DockModel.bounceChanged`.
-            .onChange(of: isBouncing, initial: true) { _, bouncing in
-                model.bounceChanged(item.id, isBouncing: bouncing)
+            // A relaunch while finishing carries on the same cycle. Otherwise the icon rests at the
+            // end of its cycle, at once when it is not drawn.
+            .onChange(of: wantsBounce, initial: true) { _, wants in
+                if wants {
+                    if bounceStart == nil { bounceStart = Date() }
+                    isFinishing = false
+                    return
+                }
+                let delay = DockModel.bounceRestDelay(
+                    startedAt: bounceStart, now: Date(),
+                    isShown: model.settings.bouncesOnLaunch && !isDockHidden)
+                isFinishing = delay > 0
+                if !isFinishing { bounceStart = nil }
+            }
+            // A hide mid-finish leaves `wantsBounce` false as it was, so it is caught here: past the
+            // screen edge, the rest of the cycle would lift the icon into view above the hidden dock.
+            .onChange(of: isDockHidden) { _, hidden in
+                guard hidden, isFinishing else { return }
+                isFinishing = false
+                bounceStart = nil
+            }
+            // Cancelled when `isFinishing` changes again, by a relaunch or a hide.
+            .task(id: isFinishing) {
+                guard isFinishing else { return }
+                let delay = DockModel.bounceRestDelay(startedAt: bounceStart, now: Date(), isShown: true)
+                try? await Task.sleep(for: .seconds(delay))
+                guard !Task.isCancelled else { return }
+                isFinishing = false
+                bounceStart = nil
             }
             // Lit for a file dropped on the app, not for an icon passing over while being reordered.
             .brightness(isTargeted && model.drag == nil ? 0.15 : 0)
@@ -318,7 +352,7 @@ private struct DockItemMenu: View {
         case .minimizedWindow:
             Button("Restore") { model.open(item) }
             if let windowID = item.windowID, let pid = item.pid {
-                Button("Close Window") { WindowActions.close(windowID, pid: pid) }
+                Button("Close Window") { model.closeMinimizedWindow(windowID, pid: pid) }
             }
         case .spacer:
             Button("Remove from Dock") { model.unpin(item) }

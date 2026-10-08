@@ -45,4 +45,15 @@ final class SettingsSyncDecodeTests: XCTestCase {
         let fine = try PortableSettings.decoded(from: Data(#"{"edge":"left","iconSize":48}"#.utf8))
         XCTAssertFalse(fine.isBeyondThisBuild)
     }
+
+    /// Every field is optional, so any JSON object decodes; import tells a settings file from some
+    /// other object by whether it carried a single known setting.
+    func testImportOfUnrelatedObjectIsEmpty() throws {
+        let other = try PortableSettings.decoded(from: Data(#"{"name":"x","items":[1]}"#.utf8))
+        XCTAssertTrue(other.isEmpty)
+        let none = try PortableSettings.decoded(from: Data("{}".utf8))
+        XCTAssertTrue(none.isEmpty)
+        let one = try PortableSettings.decoded(from: Data(#"{"clock24Hour":true}"#.utf8))
+        XCTAssertFalse(one.isEmpty)
+    }
 }

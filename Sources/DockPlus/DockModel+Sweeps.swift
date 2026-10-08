@@ -1,5 +1,23 @@
 import AppKit
 
+/// The sweeps asked for while one was running. Pure, for the tests.
+struct QueuedSweep {
+    private var pids: Set<pid_t> = []
+    private var isFull = false
+
+    /// `nil` asks every app.
+    mutating func add(_ requested: Set<pid_t>?) {
+        if let requested { pids.formUnion(requested) } else { isFull = true }
+    }
+
+    /// What was queued, and clears it: nil when nothing was, `.some(nil)` for every app.
+    mutating func take() -> Set<pid_t>?? {
+        defer { pids = []; isFull = false }
+        if isFull { return .some(nil) }
+        return pids.isEmpty ? nil : .some(pids)
+    }
+}
+
 extension DockModel {
     /// The minimized-window and badge sweeps, off the main thread: each app that does not answer
     /// costs its 0.3 s timeout, and on the main thread that froze magnification and clicks with it.
@@ -27,8 +45,13 @@ extension DockModel {
             if !minimizedThumbs.isEmpty { minimizedThumbs = [:] }
             return
         }
-        // A sweep still waiting on a slow app: the next beat asks again.
-        guard !isSweepingMinimized else { return }
+        // A sweep still waiting on a slow app: this request runs when it finishes. Not left to the
+        // next beat — the window signature that triggered it is already stored, so that beat would
+        // see no change, and a minimize would wait for the 30 s full sweep.
+        guard !isSweepingMinimized else {
+            queuedSweep.add(pids)
+            return
+        }
         isSweepingMinimized = true
         let pids = needsFullMinimizedSweep ? nil : pids
         needsFullMinimizedSweep = false
@@ -76,8 +99,19 @@ extension DockModel {
         return found
     }
 
+    /// Closes a minimized window from its tile. The owner is rarely frontmost, so no beat or switch
+    /// would ask it again: it is asked once the window has had time to go, or the tile stays up.
+    func closeMinimizedWindow(_ windowID: CGWindowID, pid: pid_t) {
+        WindowActions.close(windowID, pid: pid)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+            MainActor.assumeIsolated { self?.refreshMinimizedWindows(only: [pid]) }
+        }
+    }
+
     private func applyMinimizedWindows(order: [pid_t], answers: [pid_t: [MinimizedWindow]]) {
         isSweepingMinimized = false
+        // After the result below is applied, so the follow-up compares against it.
+        defer { if let queued = queuedSweep.take() { refreshMinimizedWindows(only: queued) } }
         guard settings.showsMinimizedWindows else { return }
         let found = Self.merged(order: order, answers: answers, previous: minimizedWindows)
         let known = Set(minimizedWindows.map(\.identity))

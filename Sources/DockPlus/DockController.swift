@@ -21,6 +21,9 @@ final class DockController {
     /// The item under the pointer at the last tick, for the grid: a click on its own stack's icon
     /// must reach the icon rather than close the grid on the way.
     private var hoveredItemID: String?
+    /// Where along the strip the pointer was at that tick, for telling which icon of a running-apps
+    /// tile a right-click landed on.
+    private var hoveredAlong: CGFloat = 0
     /// The display this dock is anchored to, by id: an NSScreen instance goes stale across
     /// configuration changes, an id names the display for as long as it is attached.
     private var displayID: CGDirectDisplayID
@@ -56,6 +59,8 @@ final class DockController {
     /// False while the panel's Space is not in front — a full-screen app's, where the panel, as the
     /// real Dock, does not appear. Cached, not asked per tick: the ticks run at display rate.
     private var isOnActiveSpace = true
+    /// The one-shot re-read of `isOnActiveSpace` after a Space change; see `refreshActiveSpace`.
+    private var activeSpaceRecheck: Timer?
 
     /// Nil while no screen is attached at all — display sleep or an unplug on a headless-capable Mac
     /// empties the list, and indexing it then would trap.
@@ -108,10 +113,12 @@ final class DockController {
         // nothing here — they rebuild every controller, and a new one checks as it starts.
         let workspace = NSWorkspace.shared.notificationCenter
         for name in [NSWorkspace.didActivateApplicationNotification, NSWorkspace.activeSpaceDidChangeNotification] {
+            let isSpaceChange = name == NSWorkspace.activeSpaceDidChangeNotification
             workspaceObservers.append(workspace.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
                 MainActor.assumeIsolated {
                     self?.refreshActiveSpace()
                     self?.refreshOverlap()
+                    if isSpaceChange { self?.recheckActiveSpaceSoon() }
                 }
             })
         }
@@ -135,6 +142,8 @@ final class DockController {
         overlapTimer = nil
         missionControlTimer?.invalidate()
         missionControlTimer = nil
+        activeSpaceRecheck?.invalidate()
+        activeSpaceRecheck = nil
         disarmMonitors()
         for observer in observers { NotificationCenter.default.removeObserver(observer) }
         observers = []
@@ -210,11 +219,31 @@ final class DockController {
     /// Only this item's: rebuilding every cached menu would queue an Accessibility query per app
     /// ahead of the one being opened, and re-read the login items and Spaces for each.
     private func refreshMenuWindows() {
-        guard let id = hoveredItemID, let item = model.items.first(where: { $0.id == id }),
-              item.kind == .app
+        guard let id = hoveredItemID, let item = model.items.first(where: { $0.id == id }) else { return }
+        // Over a running-apps tile the hovered item is the tile, and the menu is one of its icons'.
+        guard let target = item.kind == .runningApps ? tileApp(under: hoveredAlong, in: item)
+            : item.kind == .app ? item : nil
         else { return }
-        model.menuOpened(id)
-        if item.isRunning, let pid = item.pid { model.requestMenuWindows(for: pid) }
+        model.menuOpened(target.id)
+        if target.isRunning, let pid = target.pid { model.requestMenuWindows(for: pid) }
+    }
+
+    /// The icon of a running-apps tile at `along`, from the geometry `RunningAppsTile` draws with:
+    /// a row of `slots` icons centred in the tile's fixed width, the last slot a "+N" menu when the
+    /// apps outnumber them. Nil in the gaps, the insets and over the "+N" slot.
+    private func tileApp(under along: CGFloat, in tile: DockItem) -> DockItem? {
+        guard let index = model.items.firstIndex(where: { $0.id == tile.id }) else { return nil }
+        let size = DockItem.runningAppsIconSize(height: model.metrics.iconSize)
+        let gap = DockItem.runningAppsGap
+        let fits = RunningAppsTile.slots(
+            width: model.layout(for: state).sizes[index], inset: DockItem.runningAppsInset, gap: gap, size: size)
+        let drawn = min(tile.apps.count, fits)
+        let shown = tile.apps.count > fits ? fits - 1 : tile.apps.count
+        let rowLength = CGFloat(drawn) * size + CGFloat(drawn - 1) * gap
+        let offset = along - (model.layout(for: state).center(of: index) - rowLength / 2)
+        let slot = Int((offset / (size + gap)).rounded(.down))
+        guard offset >= 0, slot < shown, offset - CGFloat(slot) * (size + gap) <= size else { return nil }
+        return tile.apps[slot]
     }
 
     private func layoutPanel() {
@@ -300,7 +329,9 @@ final class DockController {
         // going for the dock and would otherwise pay a window-server round trip on every slow tick.
         if atEdge, !isOnActiveSpace, across <= reach { refreshActiveSpace() }
         let onEdge = isOnActiveSpace && atEdge
-        let overBar = onEdge && !state.isHidden
+        // Under Mission Control the bar is invisible, so the pointer is never over it: no hover, no
+        // magnification, no preview, and no clicks caught by a panel nobody can see.
+        let overBar = onEdge && !state.isHidden && !hiddenForMissionControl
             && along >= layout.start && along <= layout.start + layout.length && across <= reach
 
         // Only where the bar is: revealed anywhere along the edge, a bar the pointer is not over
@@ -324,14 +355,15 @@ final class DockController {
         let hoveredItem = model.drag != nil ? nil
             : hoveredIndex.flatMap { $0 < model.items.count ? model.items[$0] : nil }
         hoveredItemID = hoveredItem?.id
+        hoveredAlong = along
         // The pointer still rests on the icon while its menu is open; without this the dwell runs
         // out under the menu and the preview comes straight back. A stack's grid stands where the
         // preview would, so the same goes for it.
         if openMenus == 0, !grid.isShown {
             previews.update(
                 hovered: hoveredItem, center: hoveredIndex.map(layout.center(of:)), mouse: mouse,
-                dockFrame: frame, edge: settings.edge, barReach: reach, isDockHidden: state.isHidden,
-                screen: screen)
+                dockFrame: frame, edge: settings.edge, barReach: reach,
+                isDockHidden: state.isHidden || hiddenForMissionControl, screen: screen)
         }
 
         // Approaching: near the bar but not on it yet. The gain ramps the growth in over the last
@@ -339,7 +371,7 @@ final class DockController {
         // Not from inside a stack's grid, which sits in the approach zone: the bar would swell and the
         // poll run at display rate under a pointer that is using the grid, resting there or not.
         let inGrid = grid.contains(mouse)
-        let approaching = settings.magnifyOnApproach && settings.magnifies && onEdge && !state.isHidden
+        let approaching = settings.magnifyOnApproach && settings.magnifies && onEdge && !state.isHidden && !hiddenForMissionControl
             && alongBar && !overBar && !inGrid && across <= reach * 3
         let pointer = (overBar || approaching) ? along : nil
         if state.isOverBar != overBar { state.isOverBar = overBar }
@@ -539,6 +571,19 @@ final class DockController {
         updateMissionControlWatch()
     }
 
+    /// `panel.isOnActiveSpace` can still answer for the Space that was just left when the notification
+    /// lands (see the cache note in `tick`), and with no pointer at the bar nothing else would ask
+    /// again: the Mission Control watch would stay off under a bar that is on screen. One more read,
+    /// once the window server has settled, through the same setter.
+    private func recheckActiveSpaceSoon() {
+        activeSpaceRecheck?.invalidate()
+        let timer = Timer(timeInterval: 0.3, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated { self?.refreshActiveSpace() }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        activeSpaceRecheck = timer
+    }
+
     private func refreshActiveSpace() {
         let onActiveSpace = panel.isOnActiveSpace
         guard onActiveSpace != isOnActiveSpace else { return }
@@ -647,8 +692,12 @@ final class DockController {
             missionControlTimer?.invalidate()
             missionControlTimer = nil
             // Nothing invisible left behind: a panel hidden for Mission Control when the watch stops
-            // — paused, slid away, its Space gone — would never come back otherwise.
-            if hiddenForMissionControl { setHiddenForMissionControl(false) }
+            // — paused, its Space gone — would never come back otherwise. Not when it only slid
+            // away: restoring then would show the bar sliding out over Mission Control, and the
+            // reveal that follows opens the gate again and re-checks on the spot, before it can
+            // show anything.
+            let slidAway = state.isHidden && !isPaused && isOnActiveSpace
+            if hiddenForMissionControl, !slidAway { setHiddenForMissionControl(false) }
             return
         }
         guard missionControlTimer == nil else { return }
@@ -675,7 +724,7 @@ final class DockController {
         let windows = Self.onScreenWindows()
         let active = Self.missionControlActive(
             over: display, dockLevel: Int(CGWindowLevelForKey(.dockWindow)),
-            windows: windows, ownPID: ProcessInfo.processInfo.processIdentifier)
+            windows: windows, ownPID: ProcessInfo.processInfo.processIdentifier, dockPID: Self.dockPID())
         guard active != hiddenForMissionControl else { return }
         setHiddenForMissionControl(active)
     }
@@ -695,24 +744,41 @@ final class DockController {
     }
 
     /// Hides or shows the panel for Mission Control by its alpha, not by ordering it out: the frame
-    /// and layering stay put and `isVisible` stays true, so the pointer poll and previews read the
-    /// panel unchanged. Instant, with no animation — Mission Control's own fade is quick, and a slide
-    /// here would trail behind it.
+    /// and layering stay put and `isVisible` stays true. Instant, with no animation — Mission
+    /// Control's own fade is quick, and a slide here would trail behind it. The pointer poll treats
+    /// the bar as absent meanwhile (see `tick`), and the preview and the stack's grid, separate
+    /// panels above Mission Control's level, are taken down: alpha on this panel does not reach them.
     private func setHiddenForMissionControl(_ hidden: Bool) {
         hiddenForMissionControl = hidden
         panel.alphaValue = hidden ? 0 : 1
+        guard hidden else { return }
+        previews.hide()
+        grid.close()
+    }
+
+    /// The real Dock's process, kept between beats and looked up again only once it has gone (it
+    /// restarts under a new pid). -1 while none runs, which matches no window.
+    private static var dockApp: NSRunningApplication?
+    private static func dockPID() -> pid_t {
+        if dockApp?.isTerminated ?? true {
+            dockApp = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dock").first
+        }
+        return dockApp?.processIdentifier ?? -1
     }
 
     /// Whether Mission Control (or Exposé) is drawing over `display`: the real Dock, auto-hidden to
     /// an edge the rest of the time, puts up a window the size of the whole display at the Dock
-    /// window level while it is up. Matched by level and size, not by owner name, which needs Screen
-    /// Recording. Everything in window-server coordinates. Pure, for the tests.
+    /// window level while it is up. Matched by level, size, the Dock's pid (known without Screen
+    /// Recording, unlike its name) and being visible, as `windowOverlaps` reads alpha: another
+    /// app's full-display window at that level, or a faded-out leftover, is not the backdrop.
+    /// Everything in window-server coordinates. Pure, for the tests.
     nonisolated static func missionControlActive(
-        over display: CGRect, dockLevel: Int, windows: [[String: Any]], ownPID: pid_t
+        over display: CGRect, dockLevel: Int, windows: [[String: Any]], ownPID: pid_t, dockPID: pid_t
     ) -> Bool {
         windows.contains { info in
             guard info[kCGWindowLayer as String] as? Int == dockLevel,
-                  let pid = info[kCGWindowOwnerPID as String] as? Int, pid != Int(ownPID),
+                  let pid = info[kCGWindowOwnerPID as String] as? Int, pid != Int(ownPID), pid == Int(dockPID),
+                  (info[kCGWindowAlpha as String] as? Double ?? 1) > 0,
                   let bounds = (info[kCGWindowBounds as String] as? NSDictionary)
                       .flatMap({ CGRect(dictionaryRepresentation: $0) })
             else { return false }
