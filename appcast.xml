@@ -3,6 +3,15 @@
     <channel>
         <title>DockPlus</title>
         <item>
+            <title>0.1.0</title>
+            <pubDate>Fri, 09 Oct 2026 18:17:38 +0000</pubDate>
+            <sparkle:fullReleaseNotesLink>https://github.com/kdbaustert/DockPlus/releases/tag/v0.1.0</sparkle:fullReleaseNotesLink>
+            <sparkle:version>48</sparkle:version>
+            <sparkle:shortVersionString>0.1.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
+            <enclosure url="https://github.com/kdbaustert/DockPlus/releases/download/v0.1.0/DockPlus-0.1.0.zip" length="4583701" type="application/octet-stream" sparkle:edSignature="FzL1cqqSkZdJNzGn8t0l/mCRL3A0d5xzRpqL/VnR7NEKUn9Td9NMXEM76GDKTfBwxf4FRs7bZFMQVYLv9OkeBw=="/>
+        </item>
+        <item>
             <title>0.1.0-beta.2</title>
             <pubDate>Sat, 03 Oct 2026 23:37:37 +0000</pubDate>
             <sparkle:fullReleaseNotesLink>https://github.com/kdbaustert/DockPlus/releases/tag/v0.1.0-beta.2</sparkle:fullReleaseNotesLink>
@@ -11,16 +20,6 @@
             <sparkle:shortVersionString>0.1.0-beta.2</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
             <enclosure url="https://github.com/kdbaustert/DockPlus/releases/download/v0.1.0-beta.2/DockPlus-0.1.0-beta.2.zip" length="4523076" type="application/octet-stream" sparkle:edSignature="u8QjSTalKRFpmSP2/nYDElLyOT/Eoi+xOHqHG1w5L57wuXMQdl8p2R0yLpZ6khQpgk7C4q9PjYnaJfw1j/G5DA=="/>
-        </item>
-        <item>
-            <title>0.1.0-beta.1</title>
-            <pubDate>Tue, 29 Sep 2026 20:31:32 +0000</pubDate>
-            <sparkle:fullReleaseNotesLink>https://github.com/kdbaustert/DockPlus/releases/tag/v0.1.0-beta.1</sparkle:fullReleaseNotesLink>
-            <sparkle:channel>beta</sparkle:channel>
-            <sparkle:version>25</sparkle:version>
-            <sparkle:shortVersionString>0.1.0-beta.1</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
-            <enclosure url="https://github.com/kdbaustert/DockPlus/releases/download/v0.1.0-beta.1/DockPlus-0.1.0-beta.1.zip" length="4317527" type="application/octet-stream" sparkle:edSignature="s70Pd7BPBtS7o/b2b39cSom5jazKEAekwugR3VaMDhCuxTqdEKcRzS53AOgMMRc6dO7RZ/dr0wTxxSSxgtIgBg=="/>
         </item>
     </channel>
 </rss>
