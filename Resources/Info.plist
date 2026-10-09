@@ -17,9 +17,9 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.1.0-beta.2</string>
+	<string>0.1.0</string>
 	<key>CFBundleVersion</key>
-	<string>42</string>
+	<string>48</string>
 	<!-- Updates, through Sparkle, from a feed served by GitHub Pages off the gh-pages branch. The
 	     release workflow adds each release's entry to it; the releases themselves carry only the
 	     zip. build.sh deletes this key from local builds, so a development copy never updates
