@@ -38,7 +38,8 @@ private struct PermissionRow: View {
 struct GeneralPane: View {
     @Bindable var settings: DockSettings
     @State private var permissions = PermissionsState()
-    @State private var opensAtLogin = SMAppService.mainApp.status == .enabled
+    @State private var opensAtLogin = GeneralPane.registeredAtLogin
+    @State private var needsLoginApproval = SMAppService.mainApp.status == .requiresApproval
     @State private var loginError: String?
     /// Set while a failed change puts the toggle back, so that `onChange` does not answer the reset by
     /// trying the opposite change and replacing the real error with its own.
@@ -52,6 +53,11 @@ struct GeneralPane: View {
                     subtitle: "Off leaves no menu-bar item. Right-click the dock to get Settings back.",
                     isOn: $settings.showsMenuBarIcon)
                 SettingsToggle(title: "Start at login", isOn: $opensAtLogin)
+                if needsLoginApproval {
+                    SettingsRow(title: "Login Items", subtitle: "DockPlus is turned off in System Settings, so it won't start at login.") {
+                        Button("Open System Settings…") { SMAppService.openSystemSettingsLoginItems() }
+                    }
+                }
             }
             SettingsSection(
                 title: "macOS Dock",
@@ -152,11 +158,12 @@ struct GeneralPane: View {
                 permissions = PermissionsState()
                 // Removed in System Settings ▸ Login Items while this is open, the switch would stay
                 // on and its next click would unregister an item that is gone.
-                let enabled = SMAppService.mainApp.status == .enabled
+                let enabled = Self.registeredAtLogin
                 if enabled != opensAtLogin {
                     isResettingLogin = true
                     opensAtLogin = enabled
                 }
+                needsLoginApproval = SMAppService.mainApp.status == .requiresApproval
                 try? await Task.sleep(for: .seconds(2))
             }
         }
@@ -169,6 +176,13 @@ struct GeneralPane: View {
         }
     }
 
+    /// Registered counts even while awaiting approval: the user asked for it, and reading that as off
+    /// flipped the switch back by itself.
+    private static var registeredAtLogin: Bool {
+        let status = SMAppService.mainApp.status
+        return status == .enabled || status == .requiresApproval
+    }
+
     private func setOpensAtLogin(_ on: Bool) {
         do {
             if on {
@@ -177,9 +191,10 @@ struct GeneralPane: View {
                 try SMAppService.mainApp.unregister()
             }
             loginError = nil
+            needsLoginApproval = SMAppService.mainApp.status == .requiresApproval
         } catch {
             loginError = error.localizedDescription
-            let enabled = SMAppService.mainApp.status == .enabled
+            let enabled = Self.registeredAtLogin
             if enabled != opensAtLogin {
                 isResettingLogin = true
                 opensAtLogin = enabled

@@ -716,6 +716,7 @@ final class DockModel {
     // MARK: - Actions
 
     func open(_ item: DockItem) {
+        var launchStart: Date?
         switch item.kind {
         case .app:
             if let app = runningApp(item) {
@@ -724,13 +725,22 @@ final class DockModel {
             } else if let url = item.url {
                 // Bounce from the click, not from macOS's "will launch", which can lag a moment
                 // behind while Launch Services finds the app.
-                startedLaunching(url)
+                launchStart = startedLaunching(url, byClick: true)
             }
             if let url = item.url {
+                let launchStart = launchStart
                 // Launches it if it is not running. If it is, this sends the reopen event, which
                 // brings back a window when it has none — what a Dock click does; activating alone
                 // would leave a windowless app frontmost with nothing to show.
-                NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration())
+                NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration()) {
+                    [weak self] _, error in
+                    // A launch that failed would bounce the full timeout. Only one that began a
+                    // bounce: a reopen of a running app has none to stop. Launch Services shows its
+                    // own alert for most failures, so this only logs.
+                    guard let error, let start = launchStart else { return }
+                    NSLog("DockPlus: could not open \(url.lastPathComponent): \(error)")
+                    Task { @MainActor in self?.stopBouncing(Self.key(url), startedAt: start) }
+                }
             }
         case .folder:
             if let url = item.url { showStack(url) }
@@ -781,15 +791,21 @@ final class DockModel {
         AXUIElementPerformAction(window, kAXRaiseAction as CFString)
     }
 
-    private func startedLaunching(_ url: URL) {
+    /// A click that relaunches while the earlier launch is still counted gets a fresh start and
+    /// timeout, so the earlier launch's pending stop (see `stopBouncing`) cannot end the new bounce.
+    /// macOS's "will launch" for an app already counted is the click's own launch arriving late: it
+    /// keeps the click's start, which a failed launch's stop is matched against.
+    @discardableResult
+    private func startedLaunching(_ url: URL, byClick: Bool = false) -> Date? {
         let id = Self.key(url)
-        guard launching.insert(id).inserted else { return }
+        guard launching.insert(id).inserted || byClick else { return nil }
         let start = Date()
         launchStarts[id] = start
         // Ends the launch, not the bounce: each icon rests at the end of its own cycle (see DockIcon).
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.launchTimeout) { [weak self] in
             MainActor.assumeIsolated { self?.stopBouncing(id, startedAt: start) }
         }
+        return start
     }
 
     /// Ends the launch once it has run one whole cycle from its start, so every icon has been shown
@@ -814,10 +830,11 @@ final class DockModel {
 
     /// How long an icon whose launch just ended, and whose current bounce began at `start`, keeps
     /// bouncing to finish that cycle. Zero when it is not drawn (`isShown` false: the dock is hidden
-    /// or bouncing is off) or never began. Pure, for the tests.
+    /// or bouncing is off) or never began. Never more than one cycle: the wall clock can step back
+    /// between `start` and `now`, and the step must not be bounced out. Pure, for the tests.
     nonisolated static func bounceRestDelay(startedAt start: Date?, now: Date, isShown: Bool) -> TimeInterval {
         guard isShown, let start else { return 0 }
-        return bounceRemaining(after: now.timeIntervalSince(start))
+        return min(bounceRemaining(after: now.timeIntervalSince(start)), bounceCycle)
     }
 
     /// Only when this is still the launch it was scheduled for: a quit and relaunch inside the

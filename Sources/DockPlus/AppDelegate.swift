@@ -140,9 +140,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// With the display asleep, or another user's session in front after a fast user switch, no one
     /// can see the dock, and every timer DockPlus has went on waking the Mac for it all night: the
-    /// pointer poll, the model's two-second beat and the watchdog. Each pair's second notification
-    /// undoes its first; the two can overlap — a display that sleeps behind a switched-away session
-    /// — so the dock wakes only when neither holds.
+    /// pointer poll, the model's two-second beat, the watchdog and the widgets' clock, calendar
+    /// and weather. Each pair's second notification undoes its first; the two can overlap — a
+    /// display that sleeps behind a switched-away session — so the dock wakes only when neither holds.
     private func observeSleep() {
         let center = NSWorkspace.shared.notificationCenter
         let pairs: [(pause: Notification.Name, resume: Notification.Name)] = [
@@ -164,6 +164,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if paused { pauseReasons.insert(reason) } else { pauseReasons.remove(reason) }
         guard isPaused != wasPaused else { return }
         model?.setPaused(isPaused)
+        WidgetsModel.shared.setPaused(isPaused)
         for controller in controllers { controller.setPaused(isPaused) }
         if isPaused {
             watchdog?.invalidate()

@@ -24,7 +24,7 @@ struct NowPlayingTile: View {
                 Text(widgets.trackTitle ?? (widgets.deniedPlayer == nil ? "Nothing Playing" : "Not Allowed"))
                     .font(.system(size: 10, weight: .bold))
                     .lineLimit(1)
-                Text(widgets.trackTitle == nil ? deniedHint : widgets.trackArtist)
+                Text(subtitle)
                     .font(.system(size: 9))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -39,20 +39,12 @@ struct NowPlayingTile: View {
         .padding(.horizontal, 7)
         .widgetTile(width: width, height: height)
         .contentShape(Rectangle())
-        .onTapGesture {
-            if widgets.trackTitle == nil, widgets.deniedPlayer != nil {
-                // Never asked: the click may put the consent prompt up. Refused: macOS will not
-                // re-prompt, so System Settings is the only door.
-                widgets.playerNeedsConsent ? widgets.allowPlayers() : openAutomationSettings()
-            } else {
-                widgets.playPause()
-            }
-        }
+        .onTapGesture { tap() }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Now Playing")
         .accessibilityValue(accessibilityValue)
         .accessibilityAddTraits(.isButton)
-        .accessibilityAction { widgets.playPause() }
+        .accessibilityAction { tap() }
         .accessibilityAction(named: "Next Track") { widgets.nextTrack() }
         .accessibilityAction(named: "Previous Track") { widgets.previousTrack() }
         .contextMenu {
@@ -72,6 +64,26 @@ struct NowPlayingTile: View {
         }
     }
 
+    /// Never asked: the click may put the consent prompt up. Refused: macOS will not re-prompt,
+    /// so System Settings is the only door. Shared with VoiceOver's default action.
+    private func tap() {
+        switch WidgetsModel.tapAction(
+            showing: widgets.trackTitle != nil, isPlaying: widgets.isPlaying,
+            denied: widgets.deniedPlayer, unasked: widgets.unaskedPlayer
+        ) {
+        case .allow: widgets.allowPlayers()
+        case .openSettings: openAutomationSettings()
+        case .playPause: widgets.playPause()
+        }
+    }
+
+    /// A never-asked player says so while nothing plays, even under a paused track from the other
+    /// player: a click there asks rather than resuming the wrong one.
+    private var subtitle: String {
+        if let unasked = widgets.unaskedPlayer, !widgets.isPlaying { return "Click to allow \(unasked)" }
+        return widgets.trackTitle == nil ? deniedHint : widgets.trackArtist
+    }
+
     /// Where the permission is granted, once the tile says it is missing.
     private var deniedHint: String {
         widgets.deniedPlayer.map { "Allow control of \($0)" } ?? ""
@@ -87,6 +99,9 @@ struct NowPlayingTile: View {
         }
         guard let title = widgets.trackTitle else { return "Nothing playing" }
         let track = widgets.trackArtist.isEmpty ? title : "\(title) by \(widgets.trackArtist)"
+        if let unasked = widgets.unaskedPlayer, !widgets.isPlaying {
+            return "\(track), paused. Click to allow \(unasked)"
+        }
         return "\(track), \(widgets.isPlaying ? "playing" : "paused")"
     }
 }

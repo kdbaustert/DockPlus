@@ -246,7 +246,7 @@ final class DockSettings {
         "weatherLatitude": 0.0,
         "weatherLongitude": 0.0,
         "weatherFahrenheit": true,
-        "clock24Hour": false,
+        "clock24Hour": localeUses24Hour(),
         "barTint": "",
         "barTintIntensity": 20.0,
         "barCornerRadius": 16.0,
@@ -264,6 +264,14 @@ final class DockSettings {
         "showsRecentApps": false,
         "recentApps": [String](),
     ]
+
+    /// Whether the locale writes its hours on a 24-hour clock ("HH" or "kk" in its short-time
+    /// pattern, "h a" otherwise). The first-run value of `clock24Hour`, so de_DE does not open on
+    /// "9:41 AM"; a stored or synced choice replaces it.
+    nonisolated static func localeUses24Hour(_ locale: Locale = .current) -> Bool {
+        let pattern = DateFormatter.dateFormat(fromTemplate: "j", options: 0, locale: locale) ?? ""
+        return pattern.contains("H") || pattern.contains("k")
+    }
 
     /// What each numeric setting's Settings slider offers. `PortableSettings.clamped()` pulls a
     /// synced or imported value into the same range, so the two are one constant rather than two

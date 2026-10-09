@@ -256,8 +256,13 @@ enum SettingsFile {
             settings.apply(imported)
         } catch {
             let alert = NSAlert()
-            alert.messageText = "That file isn't a DockPlus settings file."
-            alert.informativeText = error.localizedDescription
+            if PortableSettings.isFromNewerDockPlus(error) {
+                alert.messageText = "That file is from a newer version of DockPlus."
+                alert.informativeText = "Update DockPlus, then import it again."
+            } else {
+                alert.messageText = "That file isn't a DockPlus settings file."
+                alert.informativeText = error.localizedDescription
+            }
             alert.runModal()
         }
     }
@@ -334,6 +339,12 @@ final class SettingsSync {
     /// every other Mac read its own newer edits as reverted. The first push re-reads the file.
     @ObservationIgnored private var launchHoldUntil: Date?
     @ObservationIgnored private var lastModified: Date?
+    /// When the copy in iCloud first failed to become current, while this Mac waits on it. A wait
+    /// that lasts is reported; see `noteStall`.
+    @ObservationIgnored private var stalledSince: Date?
+    /// Wall-clock time the queued write is due. `asyncAfter` counts uptime, which stops in sleep,
+    /// so a write queued before sleep fires late by the sleep's length; `push` spots that here.
+    @ObservationIgnored private var pendingWriteDue: Date?
     @ObservationIgnored private var pendingWrite: DispatchWorkItem?
     @ObservationIgnored private var watcher: DispatchSourceFileSystemObject?
     @ObservationIgnored private var poll: Timer?
@@ -417,15 +428,18 @@ final class SettingsSync {
     }
 
     private func stop(forgetAgreement: Bool) {
+        // Before the guard: iCloud going away stops the work and keeps the agreement, so a user
+        // turning sync off afterwards finds nothing running, and still means to forget it.
+        if forgetAgreement { agreed = nil }
         guard isRunning else { return }
         isRunning = false
         pendingWrite?.cancel()
         pendingWrite = nil
         watcher?.cancel()
         watcher = nil
-        if forgetAgreement { agreed = nil }
         startedWith = nil
         absentSince = nil
+        stalledSince = nil
         mayWrite = false
         launchHoldUntil = nil
         lastError = nil
@@ -465,6 +479,11 @@ final class SettingsSync {
         guard isRunning else { return }
         launchHoldUntil = .now + Self.absentGrace
         lastModified = nil
+        // The grace is wall-clock, so it would count the sleep as time the file stayed missing.
+        absentSince = nil
+        // A write queued before sleep still has its old, uptime-based timer; re-time it to honour
+        // the hold.
+        if pendingWrite != nil { scheduleWrite() }
         _ = readRemote()
     }
 
@@ -481,12 +500,19 @@ final class SettingsSync {
         }
         pendingWrite = work
         let delay = max(1, launchHoldUntil?.timeIntervalSinceNow ?? 0)
+        pendingWriteDue = .now + delay
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
     }
 
     /// The first push after launch looks at the file again, so the write is built on what iCloud has
     /// by now. A file still downloading answers `.pending`, and the write waits for it.
     private func push() {
+        // Fired long after it was due: the Mac slept, and this ran before the wake notification
+        // could start the hold. Treated as a wake, so the write still re-reads the file first.
+        if let due = pendingWriteDue, Date.now.timeIntervalSince(due) > Self.sleepSlack {
+            launchHoldUntil = launchHoldUntil ?? .now
+        }
+        pendingWriteDue = nil
         if launchHoldUntil != nil {
             launchHoldUntil = nil
             lastModified = nil
@@ -505,8 +531,10 @@ final class SettingsSync {
         // lands reschedules this write whenever the settings here still differ.
         if Self.isRemoteStale(url) {
             lastModified = nil
+            noteStall()
             return
         }
+        endStall()
         do {
             // The folder can be deleted in Finder while sync is on; without it every write fails.
             // Created only when absent: with no intermediates, creating an existing folder throws
@@ -545,6 +573,13 @@ final class SettingsSync {
 
     enum ReadResult { case adopted, unchanged, absent, pending }
 
+    /// How late a queued write may run before it is taken to have slept through its delay.
+    private static let sleepSlack: TimeInterval = 10
+
+    /// How long a copy may stay not-current before it is reported.
+    private static let stallGrace: TimeInterval = 120
+    private static let stallMessage = "iCloud has not finished downloading the latest settings."
+
     /// How long the file must stay missing before a Mac that has never agreed on one writes its own.
     private static let absentGrace: TimeInterval = 60
 
@@ -561,6 +596,7 @@ final class SettingsSync {
                 try? fm.startDownloadingUbiquitousItem(at: url)
                 return .pending
             }
+            endStall()
             // Missing at the first look is not yet missing: on a Mac new to iCloud Drive the folder's
             // listing can arrive after DockPlus starts, and writing at once put this Mac's defaults
             // over the real file. Until this Mac has agreed on a file, the absence has to last a
@@ -606,8 +642,10 @@ final class SettingsSync {
             .ubiquitousItemDownloadingStatus
         if let status, status != .current {
             try? fm.startDownloadingUbiquitousItem(at: url)
+            noteStall()
             return .pending
         }
+        endStall()
         let modified = Self.modified(url)
         if let modified, modified == lastModified { return .unchanged }
         guard let data = try? Data(contentsOf: url) else { return .pending }
@@ -641,6 +679,21 @@ final class SettingsSync {
         // This Mac's unsent edits, kept through the merge, go out on top of the file.
         if incoming != remote { scheduleWrite() }
         return .adopted
+    }
+
+    /// A copy that never becomes current holds every write back with nothing on screen, which looks
+    /// like sync working. After a couple of minutes — longer than a download normally takes — say so.
+    private func noteStall() {
+        let since = stalledSince ?? .now
+        stalledSince = since
+        guard lastError == nil, Date.now.timeIntervalSince(since) >= Self.stallGrace else { return }
+        lastError = Self.stallMessage
+    }
+
+    private func endStall() {
+        guard stalledSince != nil else { return }
+        stalledSince = nil
+        if lastError == Self.stallMessage { lastError = nil }
     }
 
     /// A newer DockPlus wrote the file. Replaced as corrupt, it lost the newer Mac's settings to this

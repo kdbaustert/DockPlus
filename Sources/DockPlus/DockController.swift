@@ -233,14 +233,17 @@ final class DockController {
     /// apps outnumber them. Nil in the gaps, the insets and over the "+N" slot.
     private func tileApp(under along: CGFloat, in tile: DockItem) -> DockItem? {
         guard let index = model.items.firstIndex(where: { $0.id == tile.id }) else { return nil }
-        let size = DockItem.runningAppsIconSize(height: model.metrics.iconSize)
+        // The fitted layout, as `DockView` draws with: on a crowded bar its icons are smaller than
+        // the setting's, and the slots move with them.
+        let layout = model.layout(for: state)
+        let size = DockItem.runningAppsIconSize(height: layout.metrics.iconSize)
         let gap = DockItem.runningAppsGap
         let fits = RunningAppsTile.slots(
-            width: model.layout(for: state).sizes[index], inset: DockItem.runningAppsInset, gap: gap, size: size)
+            width: layout.sizes[index], inset: DockItem.runningAppsInset, gap: gap, size: size)
         let drawn = min(tile.apps.count, fits)
         let shown = tile.apps.count > fits ? fits - 1 : tile.apps.count
         let rowLength = CGFloat(drawn) * size + CGFloat(drawn - 1) * gap
-        let offset = along - (model.layout(for: state).center(of: index) - rowLength / 2)
+        let offset = along - (layout.center(of: index) - rowLength / 2)
         let slot = Int((offset / (size + gap)).rounded(.down))
         guard offset >= 0, slot < shown, offset - CGFloat(slot) * (size + gap) <= size else { return nil }
         return tile.apps[slot]
@@ -518,6 +521,13 @@ final class DockController {
     }
 
     private func updateAutoHide(onEdge: Bool, across: CGFloat, overBar: Bool) {
+        // The bar counts as absent under Mission Control (see `tick`), so a countdown run now would
+        // slide it away unseen, with the pointer never having left it.
+        guard !hiddenForMissionControl else {
+            leftBarAt = nil
+            edgeHeldAt = nil
+            return
+        }
         guard autoHidesNow else {
             if state.isHidden { setHidden(false) }
             // A countdown left running when the overlap cleared kept `canIdle` false for good, and
@@ -591,6 +601,9 @@ final class DockController {
         // A full-screen Space has no DockPlus bar to hide, so the watch stops there and resumes when
         // an ordinary Space comes back.
         updateMissionControlWatch()
+        // An idle poll would leave the bar click-through until the pointer next moved. Only from
+        // idle: this also runs inside `tick`, which a wake would re-enter.
+        if onActiveSpace, timer == nil { wake() }
     }
 
     // MARK: - Overlap
@@ -751,7 +764,13 @@ final class DockController {
     private func setHiddenForMissionControl(_ hidden: Bool) {
         hiddenForMissionControl = hidden
         panel.alphaValue = hidden ? 0 : 1
-        guard hidden else { return }
+        // The poll may have idled while the bar counted as absent, leaving the panel ignoring the
+        // mouse: one tick re-reads the pointer, which is still where it was. Only from idle, since a
+        // slide's watch update calls this from inside `tick`.
+        guard hidden else {
+            if timer == nil { wake() }
+            return
+        }
         previews.hide()
         grid.close()
     }

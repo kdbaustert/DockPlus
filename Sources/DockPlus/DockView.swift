@@ -109,14 +109,16 @@ private struct DockIcon: View {
     @State private var bounceStart: Date?
     /// The launch is over but this icon is still finishing its cycle.
     @State private var isFinishing = false
+    /// Whether the keyframe track runs. Set once and cleared only when the icon rests, never from
+    /// `wantsBounce` directly: that drops a pass before `isFinishing` rises at a launch's end, and
+    /// the track would restart at its first keyframe, out of step with the rest timer.
+    @State private var isBouncing = false
 
     /// Never while the dock is hidden: it sits just past the screen edge, and a lift would show the
     /// icon above it on every launch anywhere.
     private var wantsBounce: Bool {
         model.settings.bouncesOnLaunch && !isDockHidden && model.launching.contains(item.id)
     }
-
-    private var isBouncing: Bool { wantsBounce || isFinishing }
 
     var body: some View {
         Image(nsImage: model.icon(for: item))
@@ -151,19 +153,24 @@ private struct DockIcon: View {
                 if wants {
                     if bounceStart == nil { bounceStart = Date() }
                     isFinishing = false
+                    isBouncing = true
                     return
                 }
                 let delay = DockModel.bounceRestDelay(
                     startedAt: bounceStart, now: Date(),
                     isShown: model.settings.bouncesOnLaunch && !isDockHidden)
                 isFinishing = delay > 0
-                if !isFinishing { bounceStart = nil }
+                if !isFinishing {
+                    isBouncing = false
+                    bounceStart = nil
+                }
             }
             // A hide mid-finish leaves `wantsBounce` false as it was, so it is caught here: past the
             // screen edge, the rest of the cycle would lift the icon into view above the hidden dock.
             .onChange(of: isDockHidden) { _, hidden in
                 guard hidden, isFinishing else { return }
                 isFinishing = false
+                isBouncing = false
                 bounceStart = nil
             }
             // Cancelled when `isFinishing` changes again, by a relaunch or a hide.
@@ -173,6 +180,7 @@ private struct DockIcon: View {
                 try? await Task.sleep(for: .seconds(delay))
                 guard !Task.isCancelled else { return }
                 isFinishing = false
+                isBouncing = false
                 bounceStart = nil
             }
             // Lit for a file dropped on the app, not for an icon passing over while being reordered.

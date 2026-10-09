@@ -26,6 +26,9 @@ extension WidgetsModel {
     /// calendar's and keep awake's one-shots recover the same way.
     private func armClockTimer() {
         clockTimer?.invalidate()
+        clockTimer = nil
+        // A setting or a wake while paused still repaints the tile once, but starts no timer.
+        guard !isPaused else { return }
         let timer = Timer(
             fire: Date.now.addingTimeInterval(60 - Date.now.timeIntervalSince1970.truncatingRemainder(dividingBy: 60)),
             interval: 0, repeats: false

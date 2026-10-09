@@ -29,6 +29,30 @@ final class NowPlayingTimeTests: XCTestCase {
         XCTAssertFalse(state.needsConsent)
     }
 
+    // MARK: - Tap
+
+    func testTapAsksWhileANeverAskedPlayerExistsAndNothingPlays() {
+        // Spotify paused and shown, Music never asked: a click must not resume the wrong player.
+        XCTAssertEqual(
+            WidgetsModel.tapAction(showing: true, isPlaying: false, denied: nil, unasked: "Music"), .allow)
+        XCTAssertEqual(
+            WidgetsModel.tapAction(showing: false, isPlaying: false, denied: "Music", unasked: "Music"), .allow)
+    }
+
+    func testTapPlaysPausesWhileSomethingPlaysOrOnceAnswered() {
+        XCTAssertEqual(
+            WidgetsModel.tapAction(showing: true, isPlaying: true, denied: nil, unasked: "Music"), .playPause)
+        XCTAssertEqual(
+            WidgetsModel.tapAction(showing: true, isPlaying: false, denied: nil, unasked: nil), .playPause)
+    }
+
+    func testTapOpensSettingsOnlyForARefusedPlayerWithNothingShown() {
+        XCTAssertEqual(
+            WidgetsModel.tapAction(showing: false, isPlaying: false, denied: "Spotify", unasked: nil), .openSettings)
+        XCTAssertEqual(
+            WidgetsModel.tapAction(showing: true, isPlaying: false, denied: "Spotify", unasked: nil), .playPause)
+    }
+
     // MARK: - Artwork status
 
     func testOnlyA2xxHTTPResponseIsASuccess() throws {
@@ -64,5 +88,11 @@ final class NowPlayingTimeTests: XCTestCase {
         XCTAssertTrue(format("EEEMMMd", "en_US").hasPrefix("Thu"))
         XCTAssertNotEqual(format("EEEMMMd", "en_US"), format("EEEMMMd", "de_DE"))
         XCTAssertTrue(format("EEEMMMd", "de_DE").contains("Okt"))
+    }
+
+    func testLocaleDecidesTheFirstRunClockHours() {
+        XCTAssertTrue(DockSettings.localeUses24Hour(Locale(identifier: "de_DE")))
+        XCTAssertTrue(DockSettings.localeUses24Hour(Locale(identifier: "fr_FR")))
+        XCTAssertFalse(DockSettings.localeUses24Hour(Locale(identifier: "en_US")))
     }
 }

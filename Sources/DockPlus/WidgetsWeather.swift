@@ -18,13 +18,36 @@ extension WidgetsModel {
             weatherReadingKey = nil
             return
         }
+        // Paused: nothing is fetched or timed now, and `resumeWeather` catches up on waking.
+        guard !isPaused else { return }
         refreshWeather()
+        armWeatherTimer()
+    }
+
+    private func armWeatherTimer() {
         let timer = Timer(timeInterval: 15 * 60, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.refreshWeather() }
         }
         timer.tolerance = 60
         RunLoop.main.add(timer, forMode: .common)
         weatherTimer = timer
+    }
+
+    func pauseWeather() {
+        weatherTimer?.invalidate()
+        weatherTimer = nil
+        weatherRetry?.cancel()
+        weatherRetry = nil
+    }
+
+    /// A reading under 15 minutes old for the same place and unit stands, with the timer started
+    /// again; anything else, including a setting changed while paused, is fetched now.
+    func resumeWeather() {
+        guard settings.showsWeather, widgetsOnBar, !settings.weatherLocation.isEmpty else { return }
+        let age = weatherFetchedAt.map { Date.now.timeIntervalSince($0) } ?? .infinity
+        guard weatherReadingKey == weatherKey, age < 15 * 60 else { return configureWeather() }
+        weatherTimer?.invalidate()
+        armWeatherTimer()
     }
 
     /// Everything a reading depends on, as one string to compare fetches and the shown reading by.
@@ -69,6 +92,7 @@ extension WidgetsModel {
             guard let self, !Task.isCancelled else { return }
             guard let located, let current else { return weatherFailed(for: key, mayRetry: mayRetry) }
             weatherReadingKey = key
+            weatherFetchedAt = .now
             weatherSuccesses += 1
             weatherPlace = Self.abbreviatingState(located.name)
             weatherTemperature = "\(Int(current.temperature.rounded()))°"

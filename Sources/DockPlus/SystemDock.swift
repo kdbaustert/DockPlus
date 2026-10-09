@@ -26,21 +26,32 @@ enum SystemDock {
     private static var failedAttempts = 0
     private static let maxAttempts = 3
 
+    /// What the Dock's preferences held, less DockPlus's own doing. An `autohide-delay` of
+    /// `hiddenDelay` was left by a crash or Keep Hidden once DockPlus's prefs were wiped, and its
+    /// `autohide` and `no-bouncing` came with it: saved as the user's, Restore Dock would write all
+    /// three back.
+    static func userOriginals(_ live: [String: Any]) -> [String: Any] {
+        guard (live["autohide-delay"] as? Double) != hiddenDelay else { return [:] }
+        return live
+    }
+
     static func hide() {
         guard !isRestoring else { return }
         let store = UserDefaults.standard
         // Only the first time: after a crash or a kill the Dock is still hidden, and capturing it
         // again would overwrite the originals with DockPlus's own values.
         if store.dictionary(forKey: savedKey) == nil {
-            var saved: [String: Any] = [:]
-            if let value = userValue("autohide") { saved["autohide"] = value }
-            // Not DockPlus's own value: left by a crash or Keep Hidden once its prefs were wiped, it
-            // would be saved as the user's and written back by Restore Dock.
-            if let value = userValue("autohide-delay"), (value as? Double) != hiddenDelay {
-                saved["autohide-delay"] = value
+            let originals = userOriginals(Dictionary(
+                uniqueKeysWithValues: ["autohide", "autohide-delay", "no-bouncing"].compactMap { key in
+                    userValue(key).map { (key, $0) }
+                }))
+            store.set(originals.filter { $0.key != "no-bouncing" }, forKey: savedKey)
+            if store.dictionary(forKey: savedBouncingKey) == nil {
+                store.set(originals.filter { $0.key == "no-bouncing" }, forKey: savedBouncingKey)
             }
-            store.set(saved, forKey: savedKey)
         }
+        // Saved by 0.1.0-beta.1, which hid the Dock without touching `no-bouncing`: the live value
+        // is still the user's own, even with DockPlus's delay in place.
         if store.dictionary(forKey: savedBouncingKey) == nil {
             var saved: [String: Any] = [:]
             if let value = userValue("no-bouncing") { saved["no-bouncing"] = value }

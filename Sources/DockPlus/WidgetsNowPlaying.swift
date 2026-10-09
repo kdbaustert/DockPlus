@@ -6,7 +6,7 @@ extension WidgetsModel {
     // AppleScript rather than the MediaRemote framework: MediaRemote needs an Apple-only
     // entitlement on current macOS, and DockFix ships a whole helper adapter to get around that.
     // The two players this Mac actually uses both script cleanly. Automation consent is asked
-    // only from a click on the tile (`allowPlayers`, the controls): a poll never prompts, so a
+    // only from a click on the tile (`allowPlayers`): a poll never prompts, so a
     // switch synced from another Mac does not put a permission dialog in front of someone who
     // clicked nothing, as the calendar's `requestCalendarAccess` also refuses to.
     //
@@ -19,8 +19,8 @@ extension WidgetsModel {
         /// The artwork download in flight: a newer track or a clear cancels it, so a late finish
         /// of either kind writes nothing, whatever URL it was for.
         static var artwork: Task<Void, Never>?
-        /// A click arrived mid-poll; the repoll it queued is allowed to ask for consent.
-        static var repollAsks = false
+        /// A consent prompt is up; see `allowPlayers`.
+        static var isAsking = false
     }
 
     /// The players asked, in order, with the bundle ids that tell whether each is running.
@@ -44,24 +44,53 @@ extension WidgetsModel {
         pollPlayer()
     }
 
-    /// The tile's click while no player has answered: the one place a poll may ask macOS for
-    /// Automation consent.
-    func allowPlayers() { pollPlayer(askingConsent: true) }
+    /// The tile's click while a player has not been asked: the one place macOS is asked for
+    /// Automation consent. The asking runs before the poll and holds no poll lock: a prompt blocks
+    /// until it is answered, and inside the poll it froze the tile on its old track, every notice
+    /// meanwhile only queueing a repoll. macOS prompts only for a pair never asked, so asking about
+    /// every running player puts up nothing for one already answered. Once at a time: with no poll
+    /// lock held, each click while the prompt waited started another ask, each blocking a thread.
+    func allowPlayers() {
+        guard settings.showsNowPlaying, widgetsOnBar, !Pending.isAsking else { return }
+        Pending.isAsking = true
+        let apps = runningPlayers()
+        Task { [weak self] in
+            for player in apps { _ = await Self.automationStatus(of: player.bundleID, asking: true) }
+            Pending.isAsking = false
+            self?.pollPlayer()
+        }
+    }
+
+    /// What a click on the tile does. A never-asked player outranks play/pause until something
+    /// plays, since DockPlus cannot tell whether that player is playing and a click would otherwise
+    /// start the wrong one. Refused with nothing shown: only System Settings can undo that.
+    enum NowPlayingTap: Equatable { case playPause, allow, openSettings }
+
+    nonisolated static func tapAction(
+        showing: Bool, isPlaying: Bool, denied: String?, unasked: String?
+    ) -> NowPlayingTap {
+        if unasked != nil, !isPlaying { return .allow }
+        if !showing, denied != nil { return .openSettings }
+        return .playPause
+    }
+
+    /// Only players that are running: osascript for one that is not costs a process launch to
+    /// learn nothing.
+    private func runningPlayers() -> [(name: String, bundleID: String)] {
+        let running = Set(NSWorkspace.shared.runningApplications.compactMap(\.bundleIdentifier))
+        return Self.players.filter { running.contains($0.bundleID) }
+    }
 
     private static let separator = "␟"
 
-    private func pollPlayer(askingConsent: Bool = false) {
+    private func pollPlayer() {
         guard settings.showsNowPlaying, widgetsOnBar else { return }
         if isPollingPlayer {
             needsPlayerRepoll = true
-            Pending.repollAsks = Pending.repollAsks || askingConsent
             return
         }
         isPollingPlayer = true
-        // Only players that are running: osascript for one that is not costs a process launch to
-        // learn nothing.
-        let running = Set(NSWorkspace.shared.runningApplications.compactMap(\.bundleIdentifier))
-        let apps = Self.players.filter { running.contains($0.bundleID) }
+        let apps = runningPlayers()
         Task { [weak self] in
             // A playing player beats a paused one: Music left paused must not hide Spotify playing.
             // A paused one shows only when nothing plays, and the first playing one ends the search.
@@ -70,12 +99,11 @@ extension WidgetsModel {
             var unasked: String?
             // Every running player is checked before any is scripted: the first one playing ends
             // the search below, and a player after it would otherwise never be asked, nor noticed
-            // as waiting to be. Asked before the script, not left to osascript: an unanswered
-            // consent prompt outlives the script's 3 s timeout and left "Nothing Playing" up after
-            // a yes. Off the main thread, because a prompt blocks until it is answered.
+            // as waiting to be. Checked before the script, not left to osascript: its error would
+            // not tell never asked from refused. Off the main thread: the check is a TCC round trip.
             var allowed: [(name: String, bundleID: String)] = []
             for player in apps {
-                switch await Self.automationStatus(of: player.bundleID, asking: askingConsent) {
+                switch await Self.automationStatus(of: player.bundleID, asking: false) {
                 case OSStatus(errAEEventWouldRequireUserConsent): unasked = unasked ?? player.name
                 case OSStatus(errAEEventNotPermitted): denied = denied ?? player.name
                 default: allowed.append(player)
@@ -117,9 +145,7 @@ extension WidgetsModel {
                 isPollingPlayer = false
                 if needsPlayerRepoll {
                     needsPlayerRepoll = false
-                    let asks = Pending.repollAsks
-                    Pending.repollAsks = false
-                    pollPlayer(askingConsent: asks)
+                    pollPlayer()
                 }
             }
             // Switched off while the poll ran: configurePlayer has already cleared the tile.
@@ -131,6 +157,8 @@ extension WidgetsModel {
             watchPlayerAccess()
             guard let shown else {
                 trackTitle = nil
+                // Else the tap would read a stale "playing" as something playing.
+                isPlaying = false
                 clearArtwork()
                 player = nil
                 return
@@ -162,9 +190,11 @@ extension WidgetsModel {
     /// to poll on, so the tile stayed on Not Allowed until the track changed. As the calendar's
     /// access watch: while a player is refused, each app switch asks TCC again — one question, no
     /// prompt, and no osascript launched to ask it — and polls once the answer is yes. A player
-    /// never asked is watched the same way: allowing it from Settings needs no click on the tile.
+    /// never asked is not watched: Settings lists only pairs that were asked, so it cannot be
+    /// granted there and the watch would cost a query per app switch for nothing. A click on the
+    /// tile (`allowPlayers`) is its way in.
     private func watchPlayerAccess() {
-        guard deniedPlayer != nil || unaskedPlayer != nil else {
+        guard deniedPlayer != nil, !playerNeedsConsent else {
             if let playerAccessWatch { NSWorkspace.shared.notificationCenter.removeObserver(playerAccessWatch) }
             playerAccessWatch = nil
             return
@@ -175,8 +205,7 @@ extension WidgetsModel {
         ) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self else { return }
-                let waiting = Set([self.deniedPlayer, self.unaskedPlayer].compactMap { $0 })
-                let granted = Self.players.contains { waiting.contains($0.name) && Self.mayScript($0.bundleID) }
+                let granted = Self.players.contains { $0.name == self.deniedPlayer && Self.mayScript($0.bundleID) }
                 if granted { self.pollPlayer() }
             }
         }
@@ -229,7 +258,17 @@ extension WidgetsModel {
             return
         }
         Pending.artwork = Task { [weak self] in
-            let data = try? await URLSession.shared.data(from: remote)
+            let data: (Data, URLResponse)?
+            do {
+                data = try await URLSession.shared.data(from: remote)
+            } catch {
+                // As the weather: the tile shows no cover for every failure, so the log is the only
+                // place they differ. A cancelled download is a superseded one and stays quiet.
+                if !(error is CancellationError), (error as? URLError)?.code != .cancelled {
+                    NSLog("DockPlus: the artwork download failed: \(error.localizedDescription)")
+                }
+                data = nil
+            }
             // Decoded here (a pure function); nil for an error page that got through as a "download".
             let image = data.flatMap { Self.isSuccess($0.1) ? Self.thumbnail(of: $0.0) : nil }
             // Cancelled means replaced or cleared: whatever this download found is not the tile's.
@@ -269,8 +308,8 @@ extension WidgetsModel {
     func previousTrack() { control("previous track") }
 
     private func control(_ command: String) {
-        // No player while one is refused: asking again is what notices the permission granted.
-        guard let player else { return pollPlayer(askingConsent: true) }
+        // No player while one is refused: polling again is what notices the permission granted.
+        guard let player else { return pollPlayer() }
         // Only if it is still running: a bare `tell` launches a player that quit since the last poll.
         let script = """
             if application "\(player)" is running then

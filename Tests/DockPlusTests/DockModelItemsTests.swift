@@ -261,6 +261,12 @@ final class DockModelItemsTests: XCTestCase {
             DockModel.bounceRestDelay(startedAt: now - 0.1, now: now, isShown: true), 0.5, accuracy: 1e-4)
     }
 
+    /// A wall-clock step backwards puts `start` in the future; the step must not be bounced out.
+    func testBounceRestDelayNeverExceedsOneCycle() {
+        let now = Date()
+        XCTAssertEqual(DockModel.bounceRestDelay(startedAt: now + 5, now: now, isShown: true), 0.6, accuracy: 1e-9)
+    }
+
     /// An icon that is not drawn, or never began, has nothing to finish.
     func testBounceRestDelayIsZeroWhenNotShown() {
         let now = Date()

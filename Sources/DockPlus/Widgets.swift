@@ -44,7 +44,7 @@ final class WidgetsModel {
     var unaskedPlayer: String?
     /// Which player answered last — where the controls go.
     var player: String?
-    /// Watches app switches only while a player is refused or never asked, to notice Automation being granted in
+    /// Watches app switches only while a player is refused, to notice Automation being granted in
     /// System Settings; see `watchPlayerAccess`.
     @ObservationIgnored var playerAccessWatch: NSObjectProtocol?
     @ObservationIgnored var artworkURL: String?
@@ -77,6 +77,8 @@ final class WidgetsModel {
     var isPreviewing = false
 
     @ObservationIgnored let settings: DockSettings
+    /// Set while nobody can see the dock; see `setPaused`.
+    @ObservationIgnored var isPaused = false
     @ObservationIgnored var clockTimer: Timer?
     /// Built when the clock is configured rather than per tick: two formatters a minute, forever,
     /// for output that changes only with the 24-hour setting, the time zone or the locale — each of
@@ -94,6 +96,8 @@ final class WidgetsModel {
     /// for it: keyed on the place name alone, a unit toggle or new coordinates under the same name
     /// kept the wrong reading up.
     @ObservationIgnored var weatherReadingKey: String?
+    /// When the shown reading landed, for `resumeWeather` to tell whether it is stale.
+    @ObservationIgnored var weatherFetchedAt: Date?
     /// Counts successful readings, so a retry knows whether one landed since its failure.
     @ObservationIgnored var weatherSuccesses = 0
     /// Set while a poll's osascript round trips are running; a notice arriving then waits for it
@@ -191,6 +195,27 @@ final class WidgetsModel {
         configureBattery()
         configureCalendar()
         configureKeepAwake()
+    }
+
+    /// Stopped while nobody can see the dock; see AppDelegate. The timers that only repaint the
+    /// tiles go — the minute clock, the weather's quarter hour, the calendar's next change — where
+    /// keep awake's end and the player and battery notices stay, since they do something or cost
+    /// nothing. Waking brings the clock and calendar up to date at once, and the weather only if its
+    /// reading has aged out.
+    func setPaused(_ paused: Bool) {
+        guard paused != isPaused else { return }
+        isPaused = paused
+        if paused {
+            clockTimer?.invalidate()
+            clockTimer = nil
+            calendarTimer?.invalidate()
+            calendarTimer = nil
+            pauseWeather()
+            return
+        }
+        configureClock()
+        refreshCalendar()
+        resumeWeather()
     }
 
     /// Puts the named widget on the bar, from a click or a drop — a drop of one already there only

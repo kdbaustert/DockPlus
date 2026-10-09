@@ -119,6 +119,8 @@ extension WidgetsModel {
         let shown = Self.calendarEvent(in: entries, at: now)
         calendarTitle = shown?.title
         calendarTime = shown.map { Self.calendarTimeText(for: $0, at: now, time: formatter.string(from:)) } ?? ""
+        // Paused: the tile is current, and `setPaused` refreshes it again on waking.
+        guard !isPaused else { return }
         let timer = Timer(
             fire: Self.nextCalendarBoundary(in: entries, after: now, dayEnd: dayEnd), interval: 0, repeats: false
         ) { [weak self] _ in

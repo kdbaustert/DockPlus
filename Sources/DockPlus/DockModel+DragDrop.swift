@@ -301,7 +301,8 @@ extension DockModel {
                     guard target?.kind != .trash else { return }
                     if path.hasPrefix(Self.widgetIDPrefix) {
                         self?.placeWidget(String(path.dropFirst(Self.widgetIDPrefix.count)), before: target)
-                    } else {
+                    } else if target?.kind != .runningApps {
+                        // An app dropped back on its own tile would be appended to the pins.
                         self?.place(path, before: target)
                     }
                 }
