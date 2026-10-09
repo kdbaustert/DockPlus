@@ -214,17 +214,19 @@ jobs:
           if [[ "$BETA" == "1" ]]; then
             PRERELEASE=(--prerelease --latest=false)
           fi
-          # Signed as the signing step left it: with the secrets set, the notice said "ad-hoc" all
-          # the same.
+          # Self-signed with the release certificate when the secrets hold it, ad-hoc otherwise.
+          # Either way Gatekeeper knows no developer behind it. Worded as FinderPlus's notice is.
           SIGNING="ad-hoc signed"
           if [[ -n "${CODESIGN_IDENTITY:-}" ]]; then
-            SIGNING="signed with DockPlus's own certificate rather than an Apple Developer ID"
+            SIGNING="self-signed"
           fi
           printf -v NOTES '%s\n' \
             "This build is $SIGNING, not notarised — there is no Apple Developer Program" \
             "membership behind it yet. macOS Gatekeeper will call the download damaged or from an" \
-            "unidentified developer on first launch. To open it: right-click DockPlus.app → Open, or run" \
-            '`xattr -cr /path/to/DockPlus.app` in Terminal.' \
+            "unidentified developer on first launch. To open it: launch it once and dismiss the dialog, then" \
+            "click Open Anyway in System Settings → Privacy & Security — or run" \
+            '`xattr -cr /path/to/DockPlus.app` in Terminal. (Right-click → Open no longer gets past' \
+            "Gatekeeper on current macOS.)" \
             ""
           # --generate-notes adds the changes since the last tag after the notice above.
           gh release create "$TAG" "$ASSET" \
