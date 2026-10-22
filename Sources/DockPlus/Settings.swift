@@ -245,7 +245,7 @@ final class DockSettings {
         "weatherLocation": "",
         "weatherLatitude": 0.0,
         "weatherLongitude": 0.0,
-        "weatherFahrenheit": true,
+        "weatherFahrenheit": localeUsesFahrenheit(),
         "clock24Hour": localeUses24Hour(),
         "barTint": "",
         "barTintIntensity": 20.0,
@@ -271,6 +271,24 @@ final class DockSettings {
     nonisolated static func localeUses24Hour(_ locale: Locale = .current) -> Bool {
         let pattern = DateFormatter.dateFormat(fromTemplate: "j", options: 0, locale: locale) ?? ""
         return pattern.contains("H") || pattern.contains("k")
+    }
+
+    /// Whether the user's temperature unit (System Settings ▸ General ▸ Language & Region) is
+    /// Fahrenheit. The setting rides on the locale as an `@mu=` override, which this honours; the
+    /// tile prints a bare "°", so the default has to match what the user reads elsewhere. `.weather`
+    /// usage, because that is what the tile shows — and plain usage calls the Bahamas Celsius.
+    nonisolated static func localeUsesFahrenheit(_ locale: Locale = .current) -> Bool {
+        UnitTemperature(forLocale: locale, usage: .weather) == .fahrenheit
+    }
+
+    /// Pins the unit once, so the locale default reaches fresh installs only. Every earlier build
+    /// wrote `pinnedApps` on its first launch, so an unset unit beside a stored `pinnedApps` is an
+    /// install that has been showing Fahrenheit, and keeps it. A fresh install is pinned to its
+    /// locale's unit here too: without a stored value its second launch would look like an upgrade.
+    static func pinWeatherUnit(_ store: UserDefaults, locale: Locale = .current) {
+        guard store.object(forKey: "weatherFahrenheit") == nil else { return }
+        let existing = store.object(forKey: "pinnedApps") != nil
+        store.set(existing || localeUsesFahrenheit(locale), forKey: "weatherFahrenheit")
     }
 
     /// What each numeric setting's Settings slider offers. `PortableSettings.clamped()` pulls a
@@ -315,6 +333,7 @@ final class DockSettings {
                 store.set(amount, forKey: "magnifyAmount")
             }
         }
+        Self.pinWeatherUnit(store)
         store.register(defaults: Self.registeredDefaults)
         edge = DockEdge(rawValue: store.string(forKey: "edge") ?? "") ?? .bottom
         iconSize = Self.ranged(store, "iconSize", Self.iconSizeRange)

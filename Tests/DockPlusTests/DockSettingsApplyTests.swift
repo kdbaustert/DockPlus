@@ -137,6 +137,42 @@ final class DockSettingsApplyTests: XCTestCase {
         XCTAssertEqual(settings.widgetOrder, ["stocks", "clock", "weather"] + missing)
     }
 
+    func testLocaleTemperatureUnit() {
+        XCTAssertTrue(DockSettings.localeUsesFahrenheit(Locale(identifier: "en_US")))
+        XCTAssertFalse(DockSettings.localeUsesFahrenheit(Locale(identifier: "de_DE")))
+        // The System Settings override rides on the locale.
+        XCTAssertFalse(DockSettings.localeUsesFahrenheit(Locale(identifier: "en_US@mu=celsius")))
+        XCTAssertTrue(DockSettings.localeUsesFahrenheit(Locale(identifier: "de_DE@mu=fahrenhe")))
+    }
+
+    /// An install from before the locale default keeps Fahrenheit; a fresh one follows its locale,
+    /// and stays put on its second launch rather than being mistaken for an upgrade.
+    @MainActor
+    func testWeatherUnitPinnedOnceByInstallAge() throws {
+        let name = "DockPlusTests.\(UUID().uuidString)"
+        let store = try XCTUnwrap(UserDefaults(suiteName: name))
+        addTeardownBlock { UserDefaults.standard.removePersistentDomain(forName: name) }
+        // Registered defaults are process-wide and every suite reads them, so the ones other tests
+        // registered would make the key look set.
+        UserDefaults.standard.setVolatileDomain([:], forName: UserDefaults.registrationDomain)
+        let german = Locale(identifier: "de_DE")
+        store.set(["/Applications/Safari.app"], forKey: "pinnedApps")
+        DockSettings.pinWeatherUnit(store, locale: german)
+        XCTAssertEqual(store.object(forKey: "weatherFahrenheit") as? Bool, true)
+
+        let fresh = try XCTUnwrap(UserDefaults(suiteName: name + ".fresh"))
+        addTeardownBlock { UserDefaults.standard.removePersistentDomain(forName: name + ".fresh") }
+        DockSettings.pinWeatherUnit(fresh, locale: german)
+        XCTAssertEqual(fresh.object(forKey: "weatherFahrenheit") as? Bool, false)
+        fresh.set(["/Applications/Safari.app"], forKey: "pinnedApps")
+        DockSettings.pinWeatherUnit(fresh, locale: german)
+        XCTAssertEqual(fresh.object(forKey: "weatherFahrenheit") as? Bool, false)
+
+        store.set(false, forKey: "weatherFahrenheit")
+        DockSettings.pinWeatherUnit(store, locale: german)
+        XCTAssertEqual(store.object(forKey: "weatherFahrenheit") as? Bool, false)
+    }
+
     private func fields(_ settings: PortableSettings) throws -> [String: Any] {
         try XCTUnwrap(JSONSerialization.jsonObject(with: settings.encoded()) as? [String: Any])
     }

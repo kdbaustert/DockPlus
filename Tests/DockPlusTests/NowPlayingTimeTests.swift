@@ -23,6 +23,21 @@ final class NowPlayingTimeTests: XCTestCase {
         XCTAssertFalse(state.needsConsent)
     }
 
+    func testVoiceOverOffersAPressForANeverAskedPlayerOnly() {
+        XCTAssertEqual(
+            NowPlayingTile.deniedAccessibilityValue(player: "Music", isUnasked: true),
+            "Press to allow DockPlus to control Music")
+        XCTAssertEqual(
+            NowPlayingTile.deniedAccessibilityValue(player: "Music", isUnasked: false),
+            "DockPlus is not allowed to control Music")
+    }
+
+    func testWeatherFirstFireLandsWhenTheReadingTurnsFifteenMinutes() {
+        XCTAssertEqual(WidgetsModel.weatherRefreshDelay(age: 14 * 60), 60)
+        XCTAssertEqual(WidgetsModel.weatherRefreshDelay(age: 0), 15 * 60)
+        XCTAssertEqual(WidgetsModel.weatherRefreshDelay(age: 20 * 60), 0)
+    }
+
     func testNothingWrongWhenNothingIsDenied() {
         let state = WidgetsModel.consentState(shown: false, denied: nil, unasked: nil)
         XCTAssertNil(state.denied)

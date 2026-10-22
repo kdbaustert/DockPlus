@@ -26,7 +26,7 @@ final class DockController {
     private var hoveredAlong: CGFloat = 0
     /// The display this dock is anchored to, by id: an NSScreen instance goes stale across
     /// configuration changes, an id names the display for as long as it is attached.
-    private var displayID: CGDirectDisplayID
+    private(set) var displayID: CGDirectDisplayID
     private var timer: Timer?
     private var isPollingFast = false
     private var leftBarAt: Date?
@@ -68,7 +68,7 @@ final class DockController {
         NSScreen.screens.first { $0.displayID == displayID } ?? NSScreen.screens.first
     }
 
-    init(model: DockModel, settings: DockSettings, screen: NSScreen) {
+    init(model: DockModel, settings: DockSettings, screen: NSScreen, startsHidden: Bool = false) {
         self.model = model
         self.settings = settings
         displayID = screen.displayID
@@ -122,7 +122,12 @@ final class DockController {
                 }
             })
         }
+        // A rebuilt dock that was slid away comes back slid away, through the same path as a hide, so
+        // the Mission Control watch is off for it too. If auto-hide no longer applies, the first tick
+        // reveals it as usual.
+        if startsHidden { setHidden(true, animated: false) }
         trackSettings()
+        trackItems()
         setPolling(fast: false)
         updateOverlapWatch()
         updateMissionControlWatch()
@@ -164,6 +169,18 @@ final class DockController {
             self?.updateOverlapWatch()
             // Turning on auto-hide must hide a dock the pointer is resting away from.
             self?.setPolling(fast: false)
+        }
+    }
+
+    /// An app launching or quitting changes how far the bar reaches along the edge. A poll that idled
+    /// with the pointer just past the old end left the panel click-through, so a click without
+    /// moving fell through; one tick re-reads the pointer against the new extent. Only from idle:
+    /// a running poll sees it on its own.
+    private func trackItems() {
+        observeContinuously(ownedBy: self) { [model] in
+            _ = model.items
+        } onChange: { [weak self] in
+            if self?.timer == nil { self?.wake() }
         }
     }
 
@@ -570,12 +587,18 @@ final class DockController {
             : max(layout.metrics.thickness, layout.depth + layout.metrics.padding)
     }
 
-    private func setHidden(_ hidden: Bool) {
+    var isSlidAway: Bool { state.isHidden }
+
+    private func setHidden(_ hidden: Bool, animated: Bool = true) {
         leftBarAt = nil
         edgeHeldAt = nil
         // The speed settings are multipliers on the stock quarter-second-ish slide.
         let speed = max(hidden ? settings.hideSpeed : settings.revealSpeed, 0.1)
-        withAnimation(.easeInOut(duration: 0.2 / speed)) { state.isHidden = hidden }
+        if animated {
+            withAnimation(.easeInOut(duration: 0.2 / speed)) { state.isHidden = hidden }
+        } else {
+            state.isHidden = hidden
+        }
         // A slid-away bar has nothing to show through Mission Control, and a revealed one does, so
         // the watch follows the slide — see `watchesMissionControl`.
         updateMissionControlWatch()

@@ -274,6 +274,19 @@ final class DockModelItemsTests: XCTestCase {
         XCTAssertEqual(DockModel.bounceRestDelay(startedAt: nil, now: now, isShown: true), 0)
     }
 
+    /// A package is a directory on disk but one document to the user: dropped, it is not a stack.
+    func testPackagesAreNotDroppedAsStacks() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let folder = root.appendingPathComponent("Plain")
+        let package = root.appendingPathComponent("Doc.app")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: package, withIntermediateDirectories: true)
+        XCTAssertTrue(DockModel.isPlainFolder(folder))
+        XCTAssertFalse(DockModel.isPlainFolder(package))
+        XCTAssertFalse(DockModel.isPlainFolder(root.appendingPathComponent("missing")))
+    }
+
     // MARK: - queued minimized sweeps
 
     /// A sweep skipped because one was running is not lost: it runs when that one finishes.

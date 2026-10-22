@@ -31,14 +31,20 @@ enum WindowCapture {
 
     /// Front-to-back thumbnails of `pid`'s windows, at most `maxHeight` points tall, `scale` pixels to
     /// the point — the display's backing scale, or a Retina panel showed them upscaled and soft.
-    /// Empty when permission is missing, the app has no windows, or the list cannot be read.
-    nonisolated static func thumbnails(pid: pid_t, maxHeight: CGFloat, scale: CGFloat) async -> [WindowThumb] {
+    /// Empty when the app has no windows or every capture came up blank. Nil when the window list
+    /// could not be read, or every capture that was tried failed — permission revoked, say — so the
+    /// caller does not take a failure for a real empty answer.
+    nonisolated static func thumbnails(pid: pid_t, maxHeight: CGFloat, scale: CGFloat) async -> [WindowThumb]? {
         // Cancelled between steps: the pointer sweeping along the bar with the panel up cancels a
         // capture per icon passed, and each ran to the end regardless — a window list, an AX query
         // and up to ten screenshots nobody would see.
-        guard let content = try? await SCShareableContent
-            .excludingDesktopWindows(true, onScreenWindowsOnly: false), !Task.isCancelled
-        else { return [] }
+        let content: SCShareableContent
+        do {
+            content = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: false)
+        } catch {
+            return failed(error, "window list")
+        }
+        guard !Task.isCancelled else { return [] }
         // The title filter is the one that matters: layer-0 debris — Chrome's dropdown surfaces,
         // Electron overlays — is untitled. `onScreenWindowsOnly: false` keeps windows on other
         // Spaces and minimized ones, which capture real pixels (measured: 15–60 ms each).
@@ -55,7 +61,16 @@ enum WindowCapture {
             return window.isOnScreen || isOnSomeSpace(window.windowID) || axClaimed.contains(window.windowID)
         }.prefix(10)
         guard !Task.isCancelled else { return [] }
-        return await captureAll(Array(windows), maxHeight: maxHeight, scale: scale)
+        let (thumbs, failures) = await captureAll(Array(windows), maxHeight: maxHeight, scale: scale)
+        return thumbs.isEmpty && failures > 0 && !Task.isCancelled ? nil : thumbs
+    }
+
+    /// Logs a ScreenCaptureKit error and answers nil. Cancellation is routine — the pointer sweeping
+    /// along the bar cancels a capture per icon passed — and is neither logged nor a failure.
+    private nonisolated static func failed(_ error: Error, _ what: String) -> [WindowThumb]? {
+        if Task.isCancelled || error is CancellationError { return [] }
+        NSLog("DockPlus: preview \(what) failed: \(error)")
+        return nil
     }
 
     /// Several windows by id from one enumeration of the window list — the minimized-window tiles,
@@ -66,40 +81,47 @@ enum WindowCapture {
               let content = try? await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: false)
         else { return [] }
         let wanted = Set(ids)
-        return await captureAll(content.windows.filter { wanted.contains($0.windowID) }, maxHeight: maxHeight, scale: 1)
+        return await captureAll(
+            content.windows.filter { wanted.contains($0.windowID) }, maxHeight: maxHeight, scale: 1
+        ).thumbs
     }
 
     /// In parallel, but back in the order given — front-to-back, for a pid's windows. A blank capture
     /// is no picture and is left out, which keeps a minimized tile on its app-icon fallback.
     private nonisolated static func captureAll(
         _ windows: [SCWindow], maxHeight: CGFloat, scale: CGFloat
-    ) async -> [WindowThumb] {
+    ) async -> (thumbs: [WindowThumb], failures: Int) {
         // SCWindow is not Sendable; the wrapper only carries it into the child task.
         struct Job: @unchecked Sendable {
             let index: Int
             let window: SCWindow
         }
         let jobs = windows.enumerated().map { Job(index: $0.offset, window: $0.element) }
-        let captured: [(Int, WindowThumb)] = await withTaskGroup(of: (Int, WindowThumb)?.self) { group in
+        // A nil thumb with `failed` set is an error; without it, a blank capture or a cancellation.
+        let results: [(index: Int, thumb: WindowThumb?, failed: Bool)] = await withTaskGroup(
+            of: (index: Int, thumb: WindowThumb?, failed: Bool).self
+        ) { group in
             for job in jobs {
                 group.addTask {
-                    guard !Task.isCancelled,
-                          let image = await capture(job.window, maxHeight: maxHeight, scale: scale),
-                          !isBlank(image) else {
-                        return nil
+                    guard !Task.isCancelled else { return (job.index, nil, false) }
+                    do {
+                        let image = try await capture(job.window, maxHeight: maxHeight, scale: scale)
+                        guard !isBlank(image) else { return (job.index, nil, false) }
+                        return (job.index, WindowThumb(
+                            id: job.window.windowID, title: job.window.title ?? "", frame: job.window.frame,
+                            image: image, scale: scale), false)
+                    } catch {
+                        let isFailure = failed(error, "capture") == nil
+                        return (job.index, nil, isFailure)
                     }
-                    return (job.index, WindowThumb(
-                        id: job.window.windowID, title: job.window.title ?? "", frame: job.window.frame,
-                        image: image, scale: scale))
                 }
             }
-            var out: [(Int, WindowThumb)] = []
-            for await result in group {
-                if let result { out.append(result) }
-            }
+            var out: [(index: Int, thumb: WindowThumb?, failed: Bool)] = []
+            for await result in group { out.append(result) }
             return out
         }
-        return captured.sorted { $0.0 < $1.0 }.map(\.1)
+        let thumbs = results.sorted { $0.index < $1.index }.compactMap(\.thumb)
+        return (thumbs, results.filter(\.failed).count)
     }
 
     private typealias SetCurrentSpaceFn = @convention(c) (Int32, CFString, UInt64) -> Void
@@ -166,14 +188,14 @@ enum WindowCapture {
     }
 
     /// Captured straight at thumbnail size rather than scaled afterwards.
-    private nonisolated static func capture(_ window: SCWindow, maxHeight: CGFloat, scale: CGFloat) async -> CGImage? {
+    private nonisolated static func capture(_ window: SCWindow, maxHeight: CGFloat, scale: CGFloat) async throws -> CGImage {
         let filter = SCContentFilter(desktopIndependentWindow: window)
         let config = SCStreamConfiguration()
         let pixelsPerPoint = min(1, maxHeight / max(window.frame.height, 1)) * scale
         config.width = max(Int(window.frame.width * pixelsPerPoint), 1)
         config.height = max(Int(window.frame.height * pixelsPerPoint), 1)
         config.showsCursor = false
-        return try? await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
+        return try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
     }
 
     /// Whether a capture is a transparent nothing — helper surfaces capture fully clear. Sampled on

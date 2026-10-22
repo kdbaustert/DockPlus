@@ -253,18 +253,23 @@ enum SettingsFile {
             // Every field is optional, so any JSON object decodes; one with no setting in it is
             // some other file, and applying it would do nothing without saying so.
             guard !imported.isEmpty else { throw CocoaError(.fileReadCorruptFile) }
+            // An edge or a range this build lacks would import partly and say nothing.
+            guard !imported.isBeyondThisBuild else { return showNewerVersionAlert() }
             settings.apply(imported)
         } catch {
+            if PortableSettings.isFromNewerDockPlus(error) { return showNewerVersionAlert() }
             let alert = NSAlert()
-            if PortableSettings.isFromNewerDockPlus(error) {
-                alert.messageText = "That file is from a newer version of DockPlus."
-                alert.informativeText = "Update DockPlus, then import it again."
-            } else {
-                alert.messageText = "That file isn't a DockPlus settings file."
-                alert.informativeText = error.localizedDescription
-            }
+            alert.messageText = "That file isn't a DockPlus settings file."
+            alert.informativeText = error.localizedDescription
             alert.runModal()
         }
+    }
+
+    private static func showNewerVersionAlert() {
+        let alert = NSAlert()
+        alert.messageText = "That file is from a newer version of DockPlus."
+        alert.informativeText = "Update DockPlus, then import it again."
+        alert.runModal()
     }
 }
 
@@ -481,6 +486,8 @@ final class SettingsSync {
         lastModified = nil
         // The grace is wall-clock, so it would count the sleep as time the file stayed missing.
         absentSince = nil
+        // Same for a stall: the sleep is not time the copy spent failing to download.
+        stalledSince = nil
         // A write queued before sleep still has its old, uptime-based timer; re-time it to honour
         // the hold.
         if pendingWrite != nil { scheduleWrite() }
@@ -507,10 +514,19 @@ final class SettingsSync {
     /// The first push after launch looks at the file again, so the write is built on what iCloud has
     /// by now. A file still downloading answers `.pending`, and the write waits for it.
     private func push() {
+        // It has fired, so nothing is queued; `holdAfterWake` reads this as "a write is waiting".
+        // Before anything below can schedule a new one.
+        pendingWrite = nil
         // Fired long after it was due: the Mac slept, and this ran before the wake notification
-        // could start the hold. Treated as a wake, so the write still re-reads the file first.
+        // could start the hold. Treated as a wake: the copy on disk may still read current while
+        // it is stale, so hold as `holdAfterWake` does rather than re-reading at once and writing.
         if let due = pendingWriteDue, Date.now.timeIntervalSince(due) > Self.sleepSlack {
-            launchHoldUntil = launchHoldUntil ?? .now
+            launchHoldUntil = .now + Self.absentGrace
+            lastModified = nil
+            absentSince = nil
+            stalledSince = nil
+            scheduleWrite()
+            return
         }
         pendingWriteDue = nil
         if launchHoldUntil != nil {
@@ -594,6 +610,7 @@ final class SettingsSync {
             let placeholder = url.deletingLastPathComponent().appendingPathComponent(".settings.json.icloud")
             if fm.fileExists(atPath: placeholder.path) {
                 try? fm.startDownloadingUbiquitousItem(at: url)
+                noteStall()
                 return .pending
             }
             endStall()
@@ -626,6 +643,7 @@ final class SettingsSync {
         if stat(url.path, &info) == 0, info.st_flags & UInt32(SF_DATALESS) != 0 {
             // One at a time: offline, each blocks until the network returns, and the 30 s poll and
             // every folder event would otherwise park another thread on it.
+            noteStall()
             guard !isFetching else { return .pending }
             isFetching = true
             DispatchQueue.global(qos: .utility).async { [weak self] in

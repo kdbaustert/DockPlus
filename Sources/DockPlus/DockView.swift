@@ -70,7 +70,7 @@ struct DockView: View {
                             KeepAwakeTile(width: size, height: metrics.iconSize).dockDraggable(item, model)
                         case .runningApps:
                             // No drag of the tile itself: each icon in it drags its own app.
-                            RunningAppsTile(apps: item.apps, width: size, height: metrics.iconSize, model: model)
+                            RunningAppsTile(apps: item.apps, width: size, height: metrics.iconSize, model: model, tile: item)
                                 .onDrop(of: DockModel.dropTypes, isTargeted: nil) { model.handleDrop($0, onto: item) }
                         case .app, .folder, .trash:
                             DockIcon(

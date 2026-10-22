@@ -164,6 +164,9 @@ struct GeneralPane: View {
                     opensAtLogin = enabled
                 }
                 needsLoginApproval = SMAppService.mainApp.status == .requiresApproval
+                // A failed register can leave the item awaiting approval; once it is approved the
+                // error no longer applies.
+                if SMAppService.mainApp.status == .enabled { loginError = nil }
                 try? await Task.sleep(for: .seconds(2))
             }
         }

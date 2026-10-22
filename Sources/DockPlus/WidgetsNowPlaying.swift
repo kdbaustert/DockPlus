@@ -83,8 +83,21 @@ extension WidgetsModel {
 
     private static let separator = "␟"
 
+    /// The poll a pause held back, once the dock can be seen again.
+    func resumePlayer() {
+        guard needsPlayerRepoll else { return }
+        needsPlayerRepoll = false
+        pollPlayer()
+    }
+
     private func pollPlayer() {
         guard settings.showsNowPlaying, widgetsOnBar else { return }
+        // Paused: nobody can see the tile, so a notice only notes that a poll is owed. Each poll is
+        // two TCC queries, an osascript per allowed player and an artwork download.
+        if isPaused {
+            needsPlayerRepoll = true
+            return
+        }
         if isPollingPlayer {
             needsPlayerRepoll = true
             return

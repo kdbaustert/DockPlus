@@ -122,19 +122,22 @@ final class PreviewController {
         captureTask?.cancel()
         let scale = clampScreen?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 1
         captureTask = Task { [weak self] in
-            let captured = await WindowCapture.thumbnails(pid: pid, maxHeight: Self.thumbHeight, scale: scale)
+            let result = await WindowCapture.thumbnails(pid: pid, maxHeight: Self.thumbHeight, scale: scale)
             guard let self, !Task.isCancelled, shownItemID == item.id else { return }
             captureTask = nil
-            let thumbs = onThisDisplay(captured)
+            let thumbs = onThisDisplay(result ?? [])
             guard !thumbs.isEmpty else {
-                // Running, but nothing to show — a windowless agent, every capture came up blank, the
-                // window list could not be read (`thumbnails` answers a thrown error with none), or
-                // every window is on another display's dock.
+                // Running, but nothing to show — a windowless agent, every capture came up blank, a
+                // capture failed (nil from `thumbnails`; see below), or every window is on another
+                // display's dock.
                 // Not `hide()`: that forgets the hover, and the next dwell would capture again.
                 // The refresh timer goes, though: with the panel down it has nothing to refresh.
                 refreshTimer?.invalidate()
                 refreshTimer = nil
-                emptyItemID = item.id
+                // A capture that failed is not remembered as empty: with the dwell cleared instead,
+                // resting here does not retry (it would fail again, and log, every period), but
+                // moving off and back does.
+                if result == nil { hoverStart = nil } else { emptyItemID = item.id }
                 shownItemID = nil
                 leftAt = nil
                 orderOutPanel()

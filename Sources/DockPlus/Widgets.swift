@@ -104,7 +104,8 @@ final class WidgetsModel {
     /// rather than piling a second poll onto a player that is slow to answer.
     @ObservationIgnored var isPollingPlayer = false
     /// A notice that landed mid-poll, which may carry a newer state than the one being read. Polled
-    /// for once that poll ends: no timer comes along later to catch it.
+    /// for once that poll ends: no timer comes along later to catch it. Also set by a notice while
+    /// paused, for `resumePlayer`.
     @ObservationIgnored var needsPlayerRepoll = false
     @ObservationIgnored var batterySource: CFRunLoopSource?
     /// Made only once access is granted and the tile is on: a store opens a connection to the
@@ -199,9 +200,9 @@ final class WidgetsModel {
 
     /// Stopped while nobody can see the dock; see AppDelegate. The timers that only repaint the
     /// tiles go — the minute clock, the weather's quarter hour, the calendar's next change — where
-    /// keep awake's end and the player and battery notices stay, since they do something or cost
-    /// nothing. Waking brings the clock and calendar up to date at once, and the weather only if its
-    /// reading has aged out.
+    /// keep awake's end and the battery notice stay, since they do something or cost nothing. A
+    /// player notice only notes that a poll is owed. Waking brings the clock and calendar up to date
+    /// at once, the weather only if its reading has aged out, and the player if a poll is owed.
     func setPaused(_ paused: Bool) {
         guard paused != isPaused else { return }
         isPaused = paused
@@ -216,6 +217,7 @@ final class WidgetsModel {
         configureClock()
         refreshCalendar()
         resumeWeather()
+        resumePlayer()
     }
 
     /// Puts the named widget on the bar, from a click or a drop — a drop of one already there only

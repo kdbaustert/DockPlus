@@ -1,8 +1,22 @@
 import SwiftUI
 
+private struct WidgetPreviewKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
+extension EnvironmentValues {
+    /// Set by Settings' gallery, where a click on the card switches the widget on or off. A tile
+    /// there drops its "Click to…" line: following it would take the widget off instead.
+    var isWidgetPreview: Bool {
+        get { self[WidgetPreviewKey.self] }
+        set { self[WidgetPreviewKey.self] = newValue }
+    }
+}
+
 struct NowPlayingTile: View {
     let width: CGFloat
     let height: CGFloat
+    @Environment(\.isWidgetPreview) private var isPreview
     private let widgets = WidgetsModel.shared
 
     var body: some View {
@@ -21,7 +35,7 @@ struct NowPlayingTile: View {
             .frame(width: height * 0.82, height: height * 0.82)
             .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
             VStack(alignment: .leading, spacing: 1) {
-                Text(widgets.trackTitle ?? (widgets.deniedPlayer == nil ? "Nothing Playing" : "Not Allowed"))
+                Text(widgets.trackTitle ?? (isRefused ? "Not Allowed" : "Nothing Playing"))
                     .font(.system(size: 10, weight: .bold))
                     .lineLimit(1)
                 Text(subtitle)
@@ -80,8 +94,15 @@ struct NowPlayingTile: View {
     /// A never-asked player says so while nothing plays, even under a paused track from the other
     /// player: a click there asks rather than resuming the wrong one.
     private var subtitle: String {
+        if isPreview { return widgets.trackTitle == nil ? "" : widgets.trackArtist }
         if let unasked = widgets.unaskedPlayer, !widgets.isPlaying { return "Click to allow \(unasked)" }
         return widgets.trackTitle == nil ? deniedHint : widgets.trackArtist
+    }
+
+    /// "Not Allowed" is for a refusal. A player never asked is not refused: its subtitle offers the
+    /// click, and a title saying it was turned down contradicted that.
+    private var isRefused: Bool {
+        widgets.deniedPlayer != nil && !widgets.playerNeedsConsent
     }
 
     /// Where the permission is granted, once the tile says it is missing.
@@ -95,7 +116,8 @@ struct NowPlayingTile: View {
 
     private var accessibilityValue: String {
         if widgets.trackTitle == nil, let denied = widgets.deniedPlayer {
-            return "DockPlus is not allowed to control \(denied)"
+            // A never-asked player is in `deniedPlayer` too, but a press asks it.
+            return Self.deniedAccessibilityValue(player: denied, isUnasked: widgets.playerNeedsConsent)
         }
         guard let title = widgets.trackTitle else { return "Nothing playing" }
         let track = widgets.trackArtist.isEmpty ? title : "\(title) by \(widgets.trackArtist)"
@@ -103,6 +125,12 @@ struct NowPlayingTile: View {
             return "\(track), paused. Click to allow \(unasked)"
         }
         return "\(track), \(widgets.isPlaying ? "playing" : "paused")"
+    }
+
+    nonisolated static func deniedAccessibilityValue(player: String, isUnasked: Bool) -> String {
+        isUnasked
+            ? "Press to allow DockPlus to control \(player)"
+            : "DockPlus is not allowed to control \(player)"
     }
 }
 
@@ -210,6 +238,7 @@ struct BatteryTile: View {
 struct KeepAwakeTile: View {
     let width: CGFloat
     let height: CGFloat
+    @Environment(\.isWidgetPreview) private var isPreview
     private let widgets = WidgetsModel.shared
 
     private static let durations: [(title: String, seconds: TimeInterval)] = [
@@ -259,7 +288,7 @@ struct KeepAwakeTile: View {
     }
 
     private var subtitle: String {
-        guard widgets.isKeepingAwake else { return "Click to start" }
+        guard widgets.isKeepingAwake else { return isPreview ? "Off" : "Click to start" }
         return widgets.keepAwakeEnd.isEmpty ? "Indefinitely" : "Until \(widgets.keepAwakeEnd)"
     }
 
@@ -277,6 +306,8 @@ struct RunningAppsTile: View {
     let width: CGFloat
     let height: CGFloat
     var model: DockModel?
+    /// The bar's item for this tile: what a drop on one of its icons is a drop on.
+    var tile: DockItem?
 
     var body: some View {
         let size = DockItem.runningAppsIconSize(height: height)
@@ -323,6 +354,10 @@ struct RunningAppsTile: View {
             .contentShape(Rectangle())
             .onTapGesture { model?.open(app) }
             .onDrag { model?.dragPayload(for: app) ?? NSItemProvider() }
+            // The tile's own drop would take a document for the tile; here it opens with this app.
+            .onDrop(of: DockModel.dropTypes, isTargeted: nil) {
+                model?.handleDrop($0, onto: tile, opening: app) ?? false
+            }
             .contextMenu {
                 if let model { DockContextMenu(item: app, model: model) }
             }
@@ -351,6 +386,7 @@ struct RunningAppsTile: View {
 struct CalendarTile: View {
     let width: CGFloat
     let height: CGFloat
+    @Environment(\.isWidgetPreview) private var isPreview
     private let widgets = WidgetsModel.shared
 
     var body: some View {
@@ -403,7 +439,7 @@ struct CalendarTile: View {
     private var subtitle: String {
         switch widgets.calendarAccess {
         case .granted: widgets.calendarTitle == nil ? "Today" : widgets.calendarTime
-        case .notDetermined: "Click to allow access"
+        case .notDetermined: isPreview ? "Needs access" : "Click to allow access"
         case .denied: "Allow in System Settings"
         }
     }

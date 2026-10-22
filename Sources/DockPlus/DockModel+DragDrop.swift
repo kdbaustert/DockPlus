@@ -273,7 +273,9 @@ extension DockModel {
     }
 
     /// A drop on an icon (`target`) or on the bar itself (nil).
-    func handleDrop(_ providers: [NSItemProvider], onto target: DockItem?) -> Bool {
+    /// `app` is the icon inside the running-apps tile (`target`) that the drop landed on: files
+    /// open with it, and everything else is a drop on the tile.
+    func handleDrop(_ providers: [NSItemProvider], onto target: DockItem?, opening app: DockItem? = nil) -> Bool {
         // The release of a drag Esc cancelled: only one drag session runs at a time, so this drop
         // is its own; read on, the payload would move or pin the item the cancel put back.
         if let current = drag, current.cancelled {
@@ -301,8 +303,9 @@ extension DockModel {
                     guard target?.kind != .trash else { return }
                     if path.hasPrefix(Self.widgetIDPrefix) {
                         self?.placeWidget(String(path.dropFirst(Self.widgetIDPrefix.count)), before: target)
-                    } else if target?.kind != .runningApps {
-                        // An app dropped back on its own tile would be appended to the pins.
+                    } else if path.hasPrefix(spacerPrefix) || target?.kind != .runningApps {
+                        // An app dropped back on its own tile would be appended to the pins; a new
+                        // spacer from the gallery is not one, and is placed like on any tile.
                         self?.place(path, before: target)
                     }
                 }
@@ -314,7 +317,7 @@ extension DockModel {
             for provider in files {
                 if let url = await loadURL(provider) { urls.append(url) }
             }
-            drop(urls, onto: target)
+            drop(urls, onto: target, opening: app)
         }
         return true
     }
@@ -368,7 +371,15 @@ extension DockModel {
         }
     }
 
-    private func drop(_ urls: [URL], onto target: DockItem?) {
+    /// A folder that can be a stack: not a package (.rtfd, .xcodeproj, .photoslibrary), which is a
+    /// directory on disk but a single document to the user. Only the drop asks; a stack already saved
+    /// stays one. Pure on the filesystem, for the tests.
+    nonisolated static func isPlainFolder(_ url: URL) -> Bool {
+        let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .isPackageKey])
+        return values?.isDirectory == true && values?.isPackage != true
+    }
+
+    private func drop(_ urls: [URL], onto target: DockItem?, opening app: DockItem? = nil) {
         guard !urls.isEmpty else { return }
         if target?.kind == .trash {
             // A disk dropped on the Trash is ejected, as in the macOS Dock; recycling one only fails.
@@ -385,11 +396,11 @@ extension DockModel {
             for url in urls { place(url.path, before: target) }
             return
         }
-        if let target, target.kind == .app, let app = target.url {
-            NSWorkspace.shared.open(urls, withApplicationAt: app, configuration: NSWorkspace.OpenConfiguration())
+        if let opener = app ?? target, opener.kind == .app, let appURL = opener.url {
+            NSWorkspace.shared.open(urls, withApplicationAt: appURL, configuration: NSWorkspace.OpenConfiguration())
             return
         }
-        let folders = urls.filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true }
+        let folders = urls.filter(Self.isPlainFolder)
         if target == nil || target?.kind == .folder, !folders.isEmpty {
             settings.stacks += folders.map(\.path).filter { !settings.stacks.contains($0) }
         }

@@ -118,6 +118,7 @@ private struct WidgetGallery: View {
             }
         }
         .allowsHitTesting(false)
+        .environment(\.isWidgetPreview, true)
     }
 
     private func toggle(_ name: String, isOn: Bool) {

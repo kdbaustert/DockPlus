@@ -722,7 +722,9 @@ final class DockModel {
             if let app = runningApp(item) {
                 bringForward(app)
                 restoreMinimizedWindow(of: app)
-            } else if let url = item.url {
+            } else if let url = item.url, !isRunning(url) {
+                // Not for an app that runs without being `.regular` (a menu-bar app): it has no pid
+                // here, and its reopen sends no launch event, so only the timeout would end the bounce.
                 // Bounce from the click, not from macOS's "will launch", which can lag a moment
                 // behind while Launch Services finds the app.
                 launchStart = startedLaunching(url, byClick: true)
@@ -737,8 +739,9 @@ final class DockModel {
                     // A launch that failed would bounce the full timeout. Only one that began a
                     // bounce: a reopen of a running app has none to stop. Launch Services shows its
                     // own alert for most failures, so this only logs.
-                    guard let error, let start = launchStart else { return }
+                    guard let error else { return }
                     NSLog("DockPlus: could not open \(url.lastPathComponent): \(error)")
+                    guard let start = launchStart else { return }
                     Task { @MainActor in self?.stopBouncing(Self.key(url), startedAt: start) }
                 }
             }
@@ -815,7 +818,8 @@ final class DockModel {
     private func finishedLaunching(_ url: URL) {
         let id = Self.key(url)
         guard let start = launchStarts[id] else { return }
-        let remaining = Self.bounceRemaining(after: Date().timeIntervalSince(start))
+        // Capped like the icon's rest: a wall clock stepped back must not hold the bounce to the timeout.
+        let remaining = Self.bounceRestDelay(startedAt: start, now: Date(), isShown: true)
         DispatchQueue.main.asyncAfter(deadline: .now() + remaining) { [weak self] in
             MainActor.assumeIsolated { self?.stopBouncing(id, startedAt: start) }
         }
@@ -1024,6 +1028,14 @@ final class DockModel {
     /// through different routes.
     nonisolated static func key(_ url: URL) -> String {
         url.resolvingSymlinksInPath().standardizedFileURL.path
+    }
+
+    /// Any activation policy: a menu-bar app is running but not in `regularApps`.
+    private func isRunning(_ url: URL) -> Bool {
+        let id = Self.key(url)
+        return NSWorkspace.shared.runningApplications.contains {
+            !$0.isTerminated && $0.bundleURL.map(Self.key) == id
+        }
     }
 
     private func runningApp(_ item: DockItem) -> NSRunningApplication? {

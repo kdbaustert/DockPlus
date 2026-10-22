@@ -24,13 +24,25 @@ extension WidgetsModel {
         armWeatherTimer()
     }
 
-    private func armWeatherTimer() {
-        let timer = Timer(timeInterval: 15 * 60, repeats: true) { [weak self] _ in
+    /// `firstFire` is when the first fetch lands, for a reading that is already part way through
+    /// its quarter hour; the cycle after that is the usual one.
+    private func armWeatherTimer(firstFire: Date? = nil) {
+        let timer = Timer(
+            fire: firstFire ?? Date(timeIntervalSinceNow: Self.weatherInterval), interval: Self.weatherInterval,
+            repeats: true
+        ) { [weak self] _ in
             MainActor.assumeIsolated { self?.refreshWeather() }
         }
         timer.tolerance = 60
         RunLoop.main.add(timer, forMode: .common)
         weatherTimer = timer
+    }
+
+    private nonisolated static let weatherInterval: TimeInterval = 15 * 60
+
+    /// How long a reading fetched `age` seconds ago has left before it is due again; 0 when it is.
+    nonisolated static func weatherRefreshDelay(age: TimeInterval) -> TimeInterval {
+        max(0, weatherInterval - age)
     }
 
     func pauseWeather() {
@@ -41,13 +53,14 @@ extension WidgetsModel {
     }
 
     /// A reading under 15 minutes old for the same place and unit stands, with the timer started
-    /// again; anything else, including a setting changed while paused, is fetched now.
+    /// again to land when that reading turns 15, not 15 minutes from now; anything else, including
+    /// a setting changed while paused, is fetched now.
     func resumeWeather() {
         guard settings.showsWeather, widgetsOnBar, !settings.weatherLocation.isEmpty else { return }
         let age = weatherFetchedAt.map { Date.now.timeIntervalSince($0) } ?? .infinity
-        guard weatherReadingKey == weatherKey, age < 15 * 60 else { return configureWeather() }
+        guard weatherReadingKey == weatherKey, age < Self.weatherInterval else { return configureWeather() }
         weatherTimer?.invalidate()
-        armWeatherTimer()
+        armWeatherTimer(firstFire: Date(timeIntervalSinceNow: Self.weatherRefreshDelay(age: age)))
     }
 
     /// Everything a reading depends on, as one string to compare fetches and the shown reading by.

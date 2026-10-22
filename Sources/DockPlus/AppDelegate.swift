@@ -191,6 +191,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// stale frames.
     private func rebuildControllers() {
         guard let model else { return }
+        // A dock that was slid away comes back slid away, or every display change would flash the
+        // bar until the hide delay ran out. Keyed by display, since the set of docks can change.
+        let hiddenDisplays = Set(controllers.filter(\.isSlidAway).compactMap { controller in
+            NSScreen.screens.first { $0.displayID == controller.displayID }?.displayUUID
+        })
         for controller in controllers { controller.tearDown() }
         let screens = NSScreen.screens
         guard let first = screens.first else {
@@ -202,7 +207,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case .specific: [screens.first { $0.displayUUID == settings.specificDisplay } ?? first]
         case .followPointer, .primary: [first]
         }
-        controllers = targets.map { DockController(model: model, settings: settings, screen: $0) }
+        controllers = targets.map { screen in
+            DockController(
+                model: model, settings: settings, screen: screen,
+                startsHidden: screen.displayUUID.map(hiddenDisplays.contains) ?? false)
+        }
         // Displays come and go around sleep; a dock built while paused starts paused.
         if isPaused {
             for controller in controllers { controller.setPaused(true) }
