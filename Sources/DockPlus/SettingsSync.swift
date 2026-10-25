@@ -511,8 +511,13 @@ final class SettingsSync {
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
     }
 
-    /// The first push after launch looks at the file again, so the write is built on what iCloud has
-    /// by now. A file still downloading answers `.pending`, and the write waits for it.
+    /// Every push looks at the file again before writing, so the write is built on what iCloud has
+    /// by now. iCloud can swap in another Mac's newer file without a folder event, and until the next
+    /// poll (up to ~35 s) this Mac's edit went over it with no conflict recorded, because the write
+    /// was a clean successor of the downloaded version — the other Mac's edit then reverted
+    /// everywhere. Cheap when nothing moved: `readRemote` answers `.unchanged` off the timestamp.
+    /// A file still downloading answers `.pending`, and the write waits for it. A write that
+    /// adoption schedules does not loop: by the time it fires the timestamp matches.
     private func push() {
         // It has fired, so nothing is queued; `holdAfterWake` reads this as "a write is waiting".
         // Before anything below can schedule a new one.
@@ -531,9 +536,11 @@ final class SettingsSync {
         pendingWriteDue = nil
         if launchHoldUntil != nil {
             launchHoldUntil = nil
+            // Forgotten so the read below looks even if the timestamp has not moved: after a wake
+            // the copy on disk can read current while iCloud has newer on the way.
             lastModified = nil
-            guard readRemote() != .pending else { return }
         }
+        guard readRemote() != .pending else { return }
         writeNow()
     }
 
@@ -647,9 +654,16 @@ final class SettingsSync {
             guard !isFetching else { return .pending }
             isFetching = true
             DispatchQueue.global(qos: .utility).async { [weak self] in
-                _ = try? Data(contentsOf: url)
+                let fetched = (try? Data(contentsOf: url)) != nil
                 DispatchQueue.main.async {
-                    MainActor.assumeIsolated { self?.isFetching = false }
+                    MainActor.assumeIsolated {
+                        guard let self else { return }
+                        self.isFetching = false
+                        // Materializing fires no folder event, so without this the file sat unread
+                        // until the next poll. Only after a read that worked: one that failed fast
+                        // would find the file still dataless and start the fetch over at once.
+                        if fetched { self.readRemote() }
+                    }
                 }
             }
             return .pending
@@ -677,13 +691,15 @@ final class SettingsSync {
             // came true and sync was silently dead on this Mac. The bytes are unrecoverable — not
             // JSON, or not a JSON object, which every schema decodes from — so this Mac's settings replace them
             // (last writer wins, as ever). Not remembered as read: until the write lands, each
-            // poll retries the replacement.
+            // poll retries the replacement. Answered as absent, not pending: `push` reads before
+            // every write, and pending would hold the replacement back for good — there is
+            // nothing here to wait for.
             NSLog("DockPlus: the iCloud settings file does not parse; replacing it")
             lastError = "The settings file in iCloud was unreadable and is being replaced."
             agreed = nil
             mayWrite = true
             scheduleWrite()
-            return .pending
+            return .absent
         }
         if remote.isBeyondThisBuild { return holdForNewerDockPlus() }
         let local = settings.portable
@@ -708,8 +724,9 @@ final class SettingsSync {
         lastError = Self.stallMessage
     }
 
+    /// Not guarded on `stalledSince`: `holdAfterWake` and the overdue branch of `push` nil it
+    /// directly, and a stall message already showing then stuck when the file turned out absent.
     private func endStall() {
-        guard stalledSince != nil else { return }
         stalledSince = nil
         if lastError == Self.stallMessage { lastError = nil }
     }

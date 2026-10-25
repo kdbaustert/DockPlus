@@ -153,8 +153,12 @@ final class DockSettingsApplyTests: XCTestCase {
         let store = try XCTUnwrap(UserDefaults(suiteName: name))
         addTeardownBlock { UserDefaults.standard.removePersistentDomain(forName: name) }
         // Registered defaults are process-wide and every suite reads them, so the ones other tests
-        // registered would make the key look set.
-        UserDefaults.standard.setVolatileDomain([:], forName: UserDefaults.registrationDomain)
+        // registered would make the key look set. Put back afterwards: a later test reading a
+        // registered default without constructing a DockSettings would otherwise find nil.
+        let registration = UserDefaults.registrationDomain
+        let registered = UserDefaults.standard.volatileDomain(forName: registration)
+        addTeardownBlock { UserDefaults.standard.setVolatileDomain(registered, forName: registration) }
+        UserDefaults.standard.setVolatileDomain([:], forName: registration)
         let german = Locale(identifier: "de_DE")
         store.set(["/Applications/Safari.app"], forKey: "pinnedApps")
         DockSettings.pinWeatherUnit(store, locale: german)

@@ -27,6 +27,9 @@ final class DockController {
     /// The display this dock is anchored to, by id: an NSScreen instance goes stale across
     /// configuration changes, an id names the display for as long as it is attached.
     private(set) var displayID: CGDirectDisplayID
+    /// The same display by UUID, recorded as the id is set: the id can be gone by the time
+    /// AppDelegate asks (a hub's displays re-enumerate after sleep), the UUID outlives it.
+    private(set) var displayUUID: String?
     private var timer: Timer?
     private var isPollingFast = false
     private var leftBarAt: Date?
@@ -72,6 +75,7 @@ final class DockController {
         self.model = model
         self.settings = settings
         displayID = screen.displayID
+        displayUUID = screen.displayUUID
         previews = PreviewController(settings: settings)
 
         let host = FirstMouseHostingView(rootView: DockView(model: model, state: state, settings: settings))
@@ -323,6 +327,7 @@ final class DockController {
             let under = NSScreen.screens.first(where: { NSMouseInRect(mouse, $0.frame, false) }),
             under.displayID != displayID {
             displayID = under.displayID
+            displayUUID = under.displayUUID
             previews.hide()
             grid.close()
             layoutPanel()

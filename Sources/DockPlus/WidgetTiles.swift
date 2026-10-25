@@ -352,7 +352,9 @@ struct RunningAppsTile: View {
             .resizable()
             .frame(width: size, height: size)
             .contentShape(Rectangle())
-            .onTapGesture { model?.open(app) }
+            // Through `click`, as the bar's icons go: Command reveals, Option hides the others, and
+            // the click-hides-frontmost setting applies here too.
+            .onTapGesture { model?.click(app, modifiers: NSEvent.modifierFlags) }
             .onDrag { model?.dragPayload(for: app) ?? NSItemProvider() }
             // The tile's own drop would take a document for the tile; here it opens with this app.
             .onDrop(of: DockModel.dropTypes, isTargeted: nil) {
@@ -365,7 +367,7 @@ struct RunningAppsTile: View {
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(app.name)
             .accessibilityAddTraits(.isButton)
-            .accessibilityAction { model?.open(app) }
+            .accessibilityAction { model?.click(app, modifiers: []) }
     }
 
     /// How many icons of `size` fit across `width`, never fewer than one: the inverse of

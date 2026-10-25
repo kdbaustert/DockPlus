@@ -36,6 +36,10 @@ final class NowPlayingTimeTests: XCTestCase {
         XCTAssertEqual(WidgetsModel.weatherRefreshDelay(age: 14 * 60), 60)
         XCTAssertEqual(WidgetsModel.weatherRefreshDelay(age: 0), 15 * 60)
         XCTAssertEqual(WidgetsModel.weatherRefreshDelay(age: 20 * 60), 0)
+        // The clock set back since the fetch: the reading is stale, not good for 15 minutes plus the jump.
+        XCTAssertEqual(WidgetsModel.weatherRefreshDelay(age: -60), 0)
+        XCTAssertFalse(WidgetsModel.weatherReadingStands(age: -60))
+        XCTAssertTrue(WidgetsModel.weatherReadingStands(age: 0))
     }
 
     func testNothingWrongWhenNothingIsDenied() {

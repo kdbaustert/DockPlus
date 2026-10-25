@@ -1,6 +1,7 @@
 import AppKit
 import ApplicationServices
 import ScreenCaptureKit
+import os
 
 /// One window's preview: enough to draw the thumbnail and to act on the window afterwards.
 /// `CGImage` is immutable; the conformance is stated because the SDK does not.
@@ -42,7 +43,7 @@ enum WindowCapture {
         do {
             content = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: false)
         } catch {
-            return failed(error, "window list")
+            return failed(error, "window list", pid: pid)
         }
         guard !Task.isCancelled else { return [] }
         // The title filter is the one that matters: layer-0 debris — Chrome's dropdown surfaces,
@@ -66,12 +67,18 @@ enum WindowCapture {
     }
 
     /// Logs a ScreenCaptureKit error and answers nil. Cancellation is routine — the pointer sweeping
-    /// along the bar cancels a capture per icon passed — and is neither logged nor a failure.
-    private nonisolated static func failed(_ error: Error, _ what: String) -> [WindowThumb]? {
+    /// along the bar cancels a capture per icon passed — and is neither logged nor a failure. Logged
+    /// once per app and error: an app whose windows can never be captured fails on every hover.
+    private nonisolated static func failed(_ error: Error, _ what: String, pid: pid_t) -> [WindowThumb]? {
         if Task.isCancelled || error is CancellationError { return [] }
-        NSLog("DockPlus: preview \(what) failed: \(error)")
+        let key = "\(pid) \(what) \((error as NSError).domain) \((error as NSError).code)"
+        if loggedFailures.withLock({ $0.insert(key).inserted }) {
+            NSLog("DockPlus: preview \(what) failed for pid \(pid): \(error)")
+        }
         return nil
     }
+
+    private nonisolated static let loggedFailures = OSAllocatedUnfairLock(initialState: Set<String>())
 
     /// Several windows by id from one enumeration of the window list — the minimized-window tiles,
     /// where a sweep can turn up several at once and each alone cost a full `SCShareableContent`
@@ -111,7 +118,8 @@ enum WindowCapture {
                             id: job.window.windowID, title: job.window.title ?? "", frame: job.window.frame,
                             image: image, scale: scale), false)
                     } catch {
-                        let isFailure = failed(error, "capture") == nil
+                        let isFailure = failed(
+                            error, "capture", pid: job.window.owningApplication?.processID ?? 0) == nil
                         return (job.index, nil, isFailure)
                     }
                 }

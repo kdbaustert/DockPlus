@@ -1,4 +1,4 @@
-import Foundation
+import AppKit
 import Sparkle
 
 /// Updates from GitHub Releases, through Sparkle: it downloads the new version, checks its EdDSA
@@ -45,5 +45,24 @@ final class UpdateChannels: NSObject, SPUUpdaterDelegate {
 
     func updaterWillRelaunchApplication(_ updater: SPUUpdater) {
         isRelaunchingForUpdate = true
+    }
+}
+
+/// Brings a scheduled update's alert to the front. An `.accessory` app is a background app to
+/// Sparkle, and for one of those a scheduled check that finds an update shows the alert without
+/// activating the app — behind whatever is frontmost. DockPlus has no tile in its own dock and no
+/// Cmd-Tab entry, so nothing ever surfaced it. Claiming gentle reminders also quiets the error
+/// Sparkle logs once per run about a background app that implements none. A check the user
+/// started is shown in front by Sparkle itself.
+final class UpdateReminders: NSObject, SPUStandardUserDriverDelegate {
+    var supportsGentleScheduledUpdateReminders: Bool { true }
+
+    /// Called just before the standard driver shows the alert, on the main thread (it is AppKit UI).
+    func standardUserDriverWillHandleShowingUpdate(
+        _ handleShowingUpdate: Bool, forUpdate update: SUAppcastItem, state: SPUUserUpdateState
+    ) {
+        guard !state.userInitiated else { return }
+        // The blunt form, as the quit dialog uses: the polite `activate()` can be declined.
+        MainActor.assumeIsolated { NSApp.activate(ignoringOtherApps: true) }
     }
 }

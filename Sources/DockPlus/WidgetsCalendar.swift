@@ -35,8 +35,10 @@ extension WidgetsModel {
         calendarAccessWatch = nil
         calendarTitle = nil
         calendarTime = ""
-        guard settings.showsCalendar, widgetsOnBar else { return }
+        // Read even with the widget off: the gallery card shows the access state whatever the toggle
+        // says. A local TCC read, never a prompt.
         calendarAccess = Self.currentCalendarAccess()
+        guard settings.showsCalendar, widgetsOnBar else { return }
         guard calendarAccess == .granted else { return watchCalendarAccess() }
         let store = EKEventStore()
         eventStore = store

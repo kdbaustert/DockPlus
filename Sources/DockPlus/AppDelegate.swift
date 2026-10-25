@@ -27,12 +27,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var settingsSync: SettingsSync?
     private var watchdog: Timer?
     private var pendingRebuild: DispatchWorkItem?
+    /// Which displays' docks were slid away at the last rebuild, by UUID; see `slidAwayDisplays(after:)`.
+    private var slidAwayDisplays: Set<String> = []
     /// Why the dock is out of sight, by the notification that said so. Paused while any is.
     private var pauseReasons: Set<Notification.Name> = []
     private var isPaused: Bool { !pauseReasons.isEmpty }
     /// Answers Sparkle's "which channels?" before each check. Held here because Sparkle keeps only
     /// a weak reference to its delegate.
     private let updateChannels = UpdateChannels()
+    /// Likewise weakly held by Sparkle's user driver.
+    private let updateReminders = UpdateReminders()
     /// nil in a build with no feed (every plain `build.sh` build), where an updater could only fail.
     private var updater: SPUStandardUpdaterController?
     /// Held so the sources stay armed; see `installSignalHandlers`.
@@ -66,7 +70,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // `startingUpdater: true` starts the scheduled daily check (SUEnableAutomaticChecks).
         if Updater.isConfigured {
             updater = SPUStandardUpdaterController(
-                startingUpdater: true, updaterDelegate: updateChannels, userDriverDelegate: nil)
+                startingUpdater: true, updaterDelegate: updateChannels, userDriverDelegate: updateReminders)
         }
         menuBarItem = MenuBarItem(settings: settings, updater: updater)
         settingsSync = SettingsSync(settings: settings)
@@ -192,17 +196,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func rebuildControllers() {
         guard let model else { return }
         // A dock that was slid away comes back slid away, or every display change would flash the
-        // bar until the hide delay ran out. Keyed by display, since the set of docks can change.
-        let hiddenDisplays = Set(controllers.filter(\.isSlidAway).compactMap { controller in
-            NSScreen.screens.first { $0.displayID == controller.displayID }?.displayUUID
-        })
+        // bar until the hide delay ran out.
+        let mode = settings.displayMode
+        slidAwayDisplays = Self.slidAwayDisplays(
+            after: controllers.map { ($0.displayUUID, $0.isSlidAway) }, remembered: slidAwayDisplays, mode: mode)
         for controller in controllers { controller.tearDown() }
         let screens = NSScreen.screens
         guard let first = screens.first else {
             controllers = []
             return
         }
-        let targets: [NSScreen] = switch settings.displayMode {
+        let targets: [NSScreen] = switch mode {
         case .all: screens
         case .specific: [screens.first { $0.displayUUID == settings.specificDisplay } ?? first]
         case .followPointer, .primary: [first]
@@ -210,11 +214,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         controllers = targets.map { screen in
             DockController(
                 model: model, settings: settings, screen: screen,
-                startsHidden: screen.displayUUID.map(hiddenDisplays.contains) ?? false)
+                startsHidden: Self.startsHidden(display: screen.displayUUID, slidAway: slidAwayDisplays, mode: mode))
         }
         // Displays come and go around sleep; a dock built while paused starts paused.
         if isPaused {
             for controller in controllers { controller.setPaused(true) }
+        }
+    }
+
+    /// The displays whose dock was slid away, by UUID, after the docks in `after` are torn down.
+    /// Keyed by UUID rather than `CGDirectDisplayID`: a hub's displays come back from sleep under new
+    /// ids, and a dock looked up by its old one was not found, so that is exactly where the flash
+    /// survived. Built over `remembered`, what the last rebuild concluded, which stands whenever
+    /// there is nothing newer to say: a rebuild that found no screen at all tore every dock down,
+    /// and in Show on Every Display a display gone for the moment keeps its answer for its return.
+    /// With one dock that follows the pointer or sits on the primary display, only that dock's own
+    /// state is kept — it goes to whatever display the next rebuild picks (see `startsHidden`), and
+    /// an entry another mode left under some other display would otherwise hide it for good.
+    nonisolated static func slidAwayDisplays(
+        after docks: [(display: String?, isSlidAway: Bool)], remembered: Set<String>, mode: DisplayMode
+    ) -> Set<String> {
+        guard !docks.isEmpty else { return remembered }
+        switch mode {
+        case .followPointer, .primary:
+            return Set(docks.filter { $0.isSlidAway }.compactMap { $0.display })
+        case .all, .specific:
+            var result = remembered
+            for dock in docks {
+                guard let display = dock.display else { continue }
+                if dock.isSlidAway { result.insert(display) } else { result.remove(display) }
+            }
+            return result
+        }
+    }
+
+    /// Whether the dock being built for `display` starts slid away. The lone dock of Follow Pointer
+    /// and primary mode carries its state whichever display it was on: the pointer may have moved
+    /// since, and Follow Pointer always builds on the first screen and hops from there.
+    nonisolated static func startsHidden(display: String?, slidAway: Set<String>, mode: DisplayMode) -> Bool {
+        switch mode {
+        case .followPointer, .primary: !slidAway.isEmpty
+        case .all, .specific: display.map(slidAway.contains) ?? false
         }
     }
 

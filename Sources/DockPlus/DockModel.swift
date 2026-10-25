@@ -735,14 +735,27 @@ final class DockModel {
                 // brings back a window when it has none — what a Dock click does; activating alone
                 // would leave a windowless app frontmost with nothing to show.
                 NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration()) {
-                    [weak self] _, error in
-                    // A launch that failed would bounce the full timeout. Only one that began a
-                    // bounce: a reopen of a running app has none to stop. Launch Services shows its
-                    // own alert for most failures, so this only logs.
-                    guard let error else { return }
-                    NSLog("DockPlus: could not open \(url.lastPathComponent): \(error)")
-                    guard let start = launchStart else { return }
-                    Task { @MainActor in self?.stopBouncing(Self.key(url), startedAt: start) }
+                    [weak self] app, error in
+                    if let error {
+                        // A launch that failed would bounce the full timeout. Only one that began a
+                        // bounce: a reopen of a running app has none to stop. Launch Services shows
+                        // its own alert for most failures, so this only logs.
+                        NSLog("DockPlus: could not open \(url.lastPathComponent): \(error)")
+                        guard let start = launchStart else { return }
+                        Task { @MainActor in self?.stopBouncing(Self.key(url), startedAt: start) }
+                        return
+                    }
+                    // An app already finished launching when this lands has nothing left to bounce
+                    // for, and may send no launch event to say so: Launch Services hands back a
+                    // running app `isRunning` did not count as this one, or a menu-bar app that
+                    // posts no "did launch". Ended like a "did launch" would end it, at the cycle
+                    // boundary — and only while this click's start still stands, so a later click's
+                    // own launch keeps its bounce.
+                    guard let start = launchStart, app?.isFinishedLaunching == true else { return }
+                    Task { @MainActor in
+                        guard let self, self.launchStarts[Self.key(url)] == start else { return }
+                        self.finishedLaunching(url)
+                    }
                 }
             }
         case .folder:
@@ -1032,9 +1045,25 @@ final class DockModel {
 
     /// Any activation policy: a menu-bar app is running but not in `regularApps`.
     private func isRunning(_ url: URL) -> Bool {
-        let id = Self.key(url)
-        return NSWorkspace.shared.runningApplications.contains {
-            !$0.isTerminated && $0.bundleURL.map(Self.key) == id
+        Self.isRunning(
+            url, bundleID: Bundle(url: url)?.bundleIdentifier,
+            among: NSWorkspace.shared.runningApplications.compactMap {
+                $0.isTerminated ? nil : (bundleID: $0.bundleIdentifier, bundleURL: $0.bundleURL)
+            })
+    }
+
+    /// Whether one of the running apps is the one a click on `url` would reach. By bundle identifier
+    /// first: Launch Services opens a pinned path by handing back any running app with the same
+    /// identifier (a beta beside the release, a build in DerivedData), so a path match alone said "not
+    /// running", started a bounce, and no launch event ever came to end it. By path for bundles with
+    /// no identifier. Pure, for the tests.
+    nonisolated static func isRunning(
+        _ url: URL, bundleID: String?, among running: [(bundleID: String?, bundleURL: URL?)]
+    ) -> Bool {
+        let id = key(url)
+        return running.contains { app in
+            if let bundleID, app.bundleID == bundleID { return true }
+            return app.bundleURL.map(key) == id
         }
     }
 

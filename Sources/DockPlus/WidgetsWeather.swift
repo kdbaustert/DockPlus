@@ -40,9 +40,16 @@ extension WidgetsModel {
 
     private nonisolated static let weatherInterval: TimeInterval = 15 * 60
 
+    /// A reading fetched `age` seconds ago still stands when that is under 15 minutes. A negative age
+    /// means the wall clock was set back since the fetch; `weatherInterval - age` would then hold the
+    /// reading for 15 minutes plus the whole jump, so it counts as stale and is fetched again.
+    nonisolated static func weatherReadingStands(age: TimeInterval) -> Bool {
+        (0..<weatherInterval).contains(age)
+    }
+
     /// How long a reading fetched `age` seconds ago has left before it is due again; 0 when it is.
     nonisolated static func weatherRefreshDelay(age: TimeInterval) -> TimeInterval {
-        max(0, weatherInterval - age)
+        weatherReadingStands(age: age) ? weatherInterval - age : 0
     }
 
     func pauseWeather() {
@@ -58,7 +65,7 @@ extension WidgetsModel {
     func resumeWeather() {
         guard settings.showsWeather, widgetsOnBar, !settings.weatherLocation.isEmpty else { return }
         let age = weatherFetchedAt.map { Date.now.timeIntervalSince($0) } ?? .infinity
-        guard weatherReadingKey == weatherKey, age < Self.weatherInterval else { return configureWeather() }
+        guard weatherReadingKey == weatherKey, Self.weatherReadingStands(age: age) else { return configureWeather() }
         weatherTimer?.invalidate()
         armWeatherTimer(firstFire: Date(timeIntervalSinceNow: Self.weatherRefreshDelay(age: age)))
     }

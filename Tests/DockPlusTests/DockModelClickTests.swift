@@ -51,6 +51,29 @@ final class DockModelClickTests: XCTestCase {
         XCTAssertEqual(action(.app, frontmost: false, hidesFrontmost: true), .open)
     }
 
+    // MARK: - isRunning
+
+    private let xcode = URL(fileURLWithPath: "/Applications/Xcode.app")
+    private let xcodeBeta = URL(fileURLWithPath: "/Applications/Xcode-beta.app")
+
+    /// Launch Services reopens the running copy whatever path was clicked, so a bounce started for
+    /// the release while the beta runs would never be ended by a launch event.
+    func testAnotherCopyWithTheSameBundleIDCountsAsRunning() {
+        XCTAssertTrue(DockModel.isRunning(
+            xcode, bundleID: "com.apple.dt.Xcode", among: [(bundleID: "com.apple.dt.Xcode", bundleURL: xcodeBeta)]))
+        XCTAssertFalse(DockModel.isRunning(
+            xcode, bundleID: "com.apple.dt.Xcode", among: [(bundleID: "com.apple.Safari", bundleURL: xcodeBeta)]))
+    }
+
+    /// A bundle with no identifier, on either side, still matches by where it is.
+    func testWithoutABundleIDThePathDecides() {
+        XCTAssertTrue(DockModel.isRunning(xcode, bundleID: nil, among: [(bundleID: nil, bundleURL: xcode)]))
+        XCTAssertTrue(DockModel.isRunning(
+            xcode, bundleID: "com.apple.dt.Xcode", among: [(bundleID: nil, bundleURL: xcode)]))
+        XCTAssertFalse(DockModel.isRunning(xcode, bundleID: nil, among: [(bundleID: nil, bundleURL: xcodeBeta)]))
+        XCTAssertFalse(DockModel.isRunning(xcode, bundleID: nil, among: [(bundleID: nil, bundleURL: nil)]))
+    }
+
     // MARK: - menuWindows
 
     func testMenuListsTitledStandardWindowsInOrder() {

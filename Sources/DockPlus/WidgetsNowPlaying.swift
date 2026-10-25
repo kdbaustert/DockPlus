@@ -119,6 +119,9 @@ extension WidgetsModel {
                 switch await Self.automationStatus(of: player.bundleID, asking: false) {
                 case OSStatus(errAEEventWouldRequireUserConsent): unasked = unasked ?? player.name
                 case OSStatus(errAEEventNotPermitted): denied = denied ?? player.name
+                // Running but not yet taking Apple events (still launching): scripting it now would
+                // put the consent prompt up from a poll. The next poll finds it ready.
+                case OSStatus(procNotFound): continue
                 default: allowed.append(player)
                 }
             }

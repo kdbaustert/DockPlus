@@ -41,6 +41,9 @@ struct GeneralPane: View {
     @State private var opensAtLogin = GeneralPane.registeredAtLogin
     @State private var needsLoginApproval = SMAppService.mainApp.status == .requiresApproval
     @State private var loginError: String?
+    /// The switch position the change behind `loginError` asked for, so the poll clears the error
+    /// only once the login item has got there.
+    @State private var failedLoginChange: Bool?
     /// Set while a failed change puts the toggle back, so that `onChange` does not answer the reset by
     /// trying the opposite change and replacing the real error with its own.
     @State private var isResettingLogin = false
@@ -158,15 +161,20 @@ struct GeneralPane: View {
                 permissions = PermissionsState()
                 // Removed in System Settings ▸ Login Items while this is open, the switch would stay
                 // on and its next click would unregister an item that is gone.
-                let enabled = Self.registeredAtLogin
+                let status = SMAppService.mainApp.status
+                let enabled = Self.isRegisteredAtLogin(status)
                 if enabled != opensAtLogin {
                     isResettingLogin = true
                     opensAtLogin = enabled
                 }
-                needsLoginApproval = SMAppService.mainApp.status == .requiresApproval
+                needsLoginApproval = status == .requiresApproval
                 // A failed register can leave the item awaiting approval; once it is approved the
-                // error no longer applies.
-                if SMAppService.mainApp.status == .enabled { loginError = nil }
+                // error no longer applies. A failed unregister leaves the item enabled, so clearing
+                // on enabled alone wiped that error within 2 s while the switch snapped back on.
+                if let wanted = failedLoginChange, wanted ? status == .enabled : !enabled {
+                    failedLoginChange = nil
+                    loginError = nil
+                }
                 try? await Task.sleep(for: .seconds(2))
             }
         }
@@ -181,9 +189,10 @@ struct GeneralPane: View {
 
     /// Registered counts even while awaiting approval: the user asked for it, and reading that as off
     /// flipped the switch back by itself.
-    private static var registeredAtLogin: Bool {
-        let status = SMAppService.mainApp.status
-        return status == .enabled || status == .requiresApproval
+    private static var registeredAtLogin: Bool { isRegisteredAtLogin(SMAppService.mainApp.status) }
+
+    private static func isRegisteredAtLogin(_ status: SMAppService.Status) -> Bool {
+        status == .enabled || status == .requiresApproval
     }
 
     private func setOpensAtLogin(_ on: Bool) {
@@ -194,9 +203,11 @@ struct GeneralPane: View {
                 try SMAppService.mainApp.unregister()
             }
             loginError = nil
+            failedLoginChange = nil
             needsLoginApproval = SMAppService.mainApp.status == .requiresApproval
         } catch {
             loginError = error.localizedDescription
+            failedLoginChange = on
             let enabled = Self.registeredAtLogin
             if enabled != opensAtLogin {
                 isResettingLogin = true

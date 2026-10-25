@@ -414,7 +414,9 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
     private static func makeWindow() -> NSWindow {
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 760, height: 580),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+            // Not miniaturizable: the macOS Dock is hidden and the minimized-tile sweep skips
+            // DockPlus's own windows, so a minimized Settings had no way back but the menu bar item.
+            styleMask: [.titled, .closable, .resizable, .fullSizeContentView],
             backing: .buffered,
             defer: false)
         window.title = "DockPlus Settings"
@@ -485,7 +487,6 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
 
         let windowItem = NSMenuItem()
         let windowMenu = NSMenu(title: "Window")
-        windowMenu.addItem(withTitle: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
         windowMenu.addItem(withTitle: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
         windowItem.submenu = windowMenu
         main.addItem(windowItem)

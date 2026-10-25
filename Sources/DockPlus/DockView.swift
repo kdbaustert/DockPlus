@@ -329,7 +329,8 @@ private struct DockItemMenu: View {
             if item.id != DockModel.finderID {
                 if item.isPinned {
                     Button("Remove from Dock") { model.unpin(item) }
-                } else {
+                } else if item.url != nil {
+                    // Not for a process with no bundle (a bare executable): there is no path to pin.
                     Button("Keep in Dock") { model.pin(item) }
                 }
                 if item.url != nil {
