@@ -142,40 +142,62 @@ enum WindowCapture {
         ((dict["ManagedSpaceID"] as? NSNumber) ?? (dict["id64"] as? NSNumber))?.uint64Value
     }
 
-    /// Switches to the Desktop holding `windowID`, on whichever display that Desktop belongs to.
-    /// Show-then-set-then-hide, not the write alone: `CGSManagedDisplaySetCurrentSpace` only
-    /// re-points the window server's bookkeeping, and the screen keeps compositing the old Desktop —
-    /// seen as "the window jumped to my Desktop and jumped back" until the write is paired with
-    /// CGSShowSpaces/CGSHideSpaces.
-    @discardableResult
-    nonisolated static func travelToSpace(of windowID: CGWindowID) -> Bool {
+    /// A Desktop change one display has to make to show a window.
+    struct SpaceTrip {
+        let display: String
+        let destination: UInt64
+        let origin: UInt64
+    }
+
+    /// The change that would show `windowID`, on whichever display its Desktop belongs to. nil when
+    /// a display already shows it, or the layout cannot be read.
+    nonisolated static func trip(toSpaceOf windowID: CGWindowID) -> SpaceTrip? {
         guard let mainConnection = SkyLight.mainConnection,
               let copySpacesForWindows = SkyLight.copySpacesForWindows,
-              let copyManaged = SkyLight.copyManaged,
-              let setCurrentSpace, let showSpaces, let hideSpaces
-        else { return false }
-        let cid = mainConnection()
-        guard let spaces = copySpacesForWindows(cid, SkyLight.allSpacesMask, [NSNumber(value: windowID)] as CFArray)?
-            .takeRetainedValue() as? [NSNumber],
-            let displays = copyManaged(cid)?.takeRetainedValue() as? [[String: Any]]
-        else { return false }
+              let spaces = copySpacesForWindows(
+                mainConnection(), SkyLight.allSpacesMask, [NSNumber(value: windowID)] as CFArray)?
+                .takeRetainedValue() as? [NSNumber]
+        else { return nil }
         // Every Space the window is on, not just the first: a window assigned to All Desktops is on
         // all of them, the list starts at Desktop 1, and switching there would yank the user away
         // from a Desktop that already shows it.
         let windowSpaces = Set(spaces.map(\.uint64Value))
-        for display in displays {
+        for display in SkyLight.managedDisplays() {
             guard let ident = display["Display Identifier"] as? String,
                   let list = display["Spaces"] as? [[String: Any]],
                   let windowSpace = list.lazy.compactMap(spaceID(from:)).first(where: windowSpaces.contains),
                   let current = (display["Current Space"] as? [String: Any]).flatMap(spaceID(from:))
             else { continue }
-            if windowSpaces.contains(current) { return false }
-            showSpaces(cid, [NSNumber(value: windowSpace)] as CFArray)
-            setCurrentSpace(cid, ident as CFString, windowSpace)
-            hideSpaces(cid, [NSNumber(value: current)] as CFArray)
-            return true
+            if windowSpaces.contains(current) { return nil }
+            return SpaceTrip(display: ident, destination: windowSpace, origin: current)
         }
-        return false
+        return nil
+    }
+
+    /// Whether `trip`'s display now shows its destination.
+    nonisolated static func hasArrived(_ trip: SpaceTrip) -> Bool {
+        SkyLight.managedDisplays().contains { display in
+            display["Display Identifier"] as? String == trip.display
+                && (display["Current Space"] as? [String: Any]).flatMap(spaceID(from:)) == trip.destination
+        }
+    }
+
+    /// Switches to the Desktop holding `windowID` without the Dock, for when the Dock will not
+    /// travel: `WindowActions.raise` asks it first. `CGSManagedDisplaySetCurrentSpace` re-points the
+    /// window server's bookkeeping and the screen keeps compositing the Desktop it came from, so the
+    /// window looks like it jumped to that Desktop and goes back on the next real transition.
+    /// Pairing the write with CGSShowSpaces/CGSHideSpaces does not prevent that (measured on macOS
+    /// 27.2: the old Desktop stayed up for minutes).
+    @discardableResult
+    nonisolated static func travelToSpace(of windowID: CGWindowID) -> Bool {
+        guard let mainConnection = SkyLight.mainConnection, let setCurrentSpace, let showSpaces, let hideSpaces,
+              let trip = trip(toSpaceOf: windowID)
+        else { return false }
+        let cid = mainConnection()
+        showSpaces(cid, [NSNumber(value: trip.destination)] as CFArray)
+        setCurrentSpace(cid, trip.display as CFString, trip.destination)
+        hideSpaces(cid, [NSNumber(value: trip.origin)] as CFArray)
+        return true
     }
 
     /// Whether the window server has the window on any Desktop.
@@ -315,17 +337,20 @@ enum WindowActions {
     /// Brings one window forward. Activating the app is not enough here: an app with another window
     /// already visible — say on the second display — keeps focus on that one and never travels, which
     /// was exactly the reported failure. So this fronts the *window* through the window server
-    /// after switching to its Desktop; app-level activation is only the fallback when the private
+    /// once its Desktop is showing; app-level activation is only the fallback when the private
     /// symbols are gone.
     static func raise(_ windowID: CGWindowID, pid: pid_t) {
+        raiseGeneration += 1
+        let generation = raiseGeneration
         let app = NSRunningApplication(processIdentifier: pid)
         let axWindow = element(for: windowID, pid: pid)
         if let axWindow {
             AXUIElementSetAttributeValue(axWindow, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
-            AXUIElementPerformAction(axWindow, kAXRaiseAction as CFString)
         }
-        let switched = WindowCapture.travelToSpace(of: windowID)
         let focusAndMark = { @MainActor () -> Bool in
+            // Raised here and not before the Desktop change, so the window is never ordered front
+            // on a Desktop the screen is still leaving.
+            if let axWindow { AXUIElementPerformAction(axWindow, kAXRaiseAction as CFString) }
             guard focus(windowID, pid: pid) else { return false }
             if let axWindow {
                 // The app's own bookkeeping, so it draws the window active rather than dimmed.
@@ -334,21 +359,137 @@ enum WindowActions {
             }
             return true
         }
-        if focusAndMark() {
+        let front = { @MainActor in
+            if focusAndMark() { return }
+            NSApp.activate(ignoringOtherApps: true)
+            if axWindow != nil {
+                app?.activate()
+            } else {
+                // No AX and no window server: the whole app, all windows.
+                app?.activate(from: .current, options: [.activateAllWindows])
+            }
+        }
+        guard let trip = WindowCapture.trip(toSpaceOf: windowID) else {
+            front()
+            return
+        }
+        Task {
+            let travelled = await dockTravels(trip, to: windowID, pid: pid, axWindow: axWindow)
+            guard generation == raiseGeneration else { return }
+            if !travelled {
+                NSLog("DockPlus: the Dock did not travel to window %u; switching Desktops without it", windowID)
+                WindowCapture.travelToSpace(of: windowID)
+            }
+            front()
             // Again after a Desktop switch, not only during it: key events posted mid-transition are
             // swallowed — measured here, Chrome kept its other display's window focused until the
             // focus was retried once the switch had landed.
-            if switched {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { _ = focusAndMark() }
-            }
-        } else if axWindow != nil {
-            NSApp.activate(ignoringOtherApps: true)
-            app?.activate()
-        } else {
-            // No AX and no window server: the whole app, all windows.
-            NSApp.activate(ignoringOtherApps: true)
-            app?.activate(from: .current, options: [.activateAllWindows])
+            try? await Task.sleep(for: .milliseconds(450))
+            guard generation == raiseGeneration else { return }
+            _ = focusAndMark()
         }
+    }
+
+    /// Counts raises. A raise that waits on a Desktop change checks this before it touches the
+    /// window, so one the user has already replaced cannot pull them back.
+    private static var raiseGeneration = 0
+
+    /// Long enough for the Dock to arrive: 380 to 444ms after it is asked, measured on macOS 27.2.
+    private static let travelWait: Duration = .milliseconds(560)
+
+    /// Has the Dock switch to the window's Desktop itself, which redraws the screen where
+    /// `WindowCapture.travelToSpace` does not. Activating the app is enough when it has nothing in
+    /// view. Otherwise, and for Finder, the window's entry in the app's Window menu is pressed: the
+    /// app orders the window front and the Dock follows. False when neither moved the display.
+    private static func dockTravels(
+        _ trip: WindowCapture.SpaceTrip, to windowID: CGWindowID, pid: pid_t, axWindow: AXUIElement?
+    ) async -> Bool {
+        let app = NSRunningApplication(processIdentifier: pid)
+        let arrived = { WindowCapture.hasArrived(trip) }
+        if let inView = windowInView(of: pid, besides: windowID) {
+            // By window: activating an app that has a window in view never travels, and can pull
+            // the window being raised onto this Desktop instead.
+            _ = focus(inView, pid: pid)
+        } else {
+            app?.activate()
+            if travelsOnActivation(app), await waits(upTo: travelWait, until: arrived) { return true }
+        }
+        guard let item = windowMenuItem(for: windowID, pid: pid, axWindow: axWindow) else { return false }
+        // The press is refused until the app is the active one, a few event-loop turns after the
+        // window server accepts the front.
+        _ = await waits(upTo: .milliseconds(300)) {
+            NSWorkspace.shared.frontmostApplication?.processIdentifier == pid
+        }
+        // The reply waits on the app ordering its window front, which the 0.3s the reads get can cut short.
+        AXUIElementSetMessagingTimeout(item, 1)
+        guard AXUIElementPerformAction(item, kAXPressAction as CFString) == .success else { return false }
+        return await waits(upTo: travelWait, until: arrived)
+    }
+
+    /// Whether `condition` came true within `limit`, asked every 20ms.
+    private static func waits(upTo limit: Duration, until condition: () -> Bool) async -> Bool {
+        let deadline = ContinuousClock.now + limit
+        while !condition() {
+            guard ContinuousClock.now < deadline else { return false }
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        return true
+    }
+
+    /// Whether macOS switches Desktops when `app` is activated with nothing in view. Mission
+    /// Control's "When switching to an application, switch to a Space with open windows" decides
+    /// it, and Finder does not travel even then (measured on macOS 27.2).
+    private static func travelsOnActivation(_ app: NSRunningApplication?) -> Bool {
+        let follows = CFPreferencesCopyAppValue("workspaces-auto-swoosh" as CFString, "com.apple.dock" as CFString)
+        return (follows as? Bool ?? true) && app?.bundleIdentifier != "com.apple.finder"
+    }
+
+    /// The frontmost window of `pid` on screen now, leaving out `windowID`; nil when it has none.
+    private static func windowInView(of pid: pid_t, besides windowID: CGWindowID) -> CGWindowID? {
+        let onScreen = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
+            as? [[String: Any]] ?? []
+        return onScreen.lazy
+            .filter { ($0[kCGWindowOwnerPID as String] as? pid_t) == pid && ($0[kCGWindowLayer as String] as? Int) == 0 }
+            .compactMap { $0[kCGWindowNumber as String] as? CGWindowID }
+            .first { $0 != windowID }
+    }
+
+    /// The window's entry in its app's Window menu, found by title because the item names its window
+    /// by nothing else. nil when the menu lists no such window or Accessibility is not granted.
+    private static func windowMenuItem(for windowID: CGWindowID, pid: pid_t, axWindow: AXUIElement?) -> AXUIElement? {
+        guard AXIsProcessTrusted() else { return nil }
+        let info = CGWindowListCopyWindowInfo([.optionIncludingWindow], windowID) as? [[String: Any]]
+        let serverTitle = (info?.first?[kCGWindowName as String] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        guard let title = serverTitle ?? axWindow.flatMap({ string(of: $0, kAXTitleAttribute) })
+        else { return nil }
+        let app = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(app, 0.3)
+        var bar: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(app, kAXMenuBarAttribute as CFString, &bar) == .success,
+              let bar = bar.map({ $0 as! AXUIElement })
+        else { return nil }
+        // AppKit sets this action on every item it adds to a windows menu, whatever the menu is called.
+        let items = children(of: bar).flatMap(children(of:)).flatMap(children(of:))
+            .filter { string(of: $0, kAXIdentifierAttribute) == "makeKeyAndOrderFront:" }
+        let titles = items.map { string(of: $0, kAXTitleAttribute) ?? "" }
+        return windowMenuIndex(forTitle: title, in: titles).map { items[$0] }
+    }
+
+    /// Which of a Window menu's item titles names the window titled `title`. Two windows with one
+    /// title match the first, which is still a window of the right app on the right Desktop.
+    nonisolated static func windowMenuIndex(forTitle title: String, in itemTitles: [String]) -> Int? {
+        let wanted = normalizedTitle(title)
+        guard !wanted.isEmpty else { return nil }
+        return itemTitles.firstIndex { normalizedTitle($0) == wanted }
+    }
+
+    /// A title without its leading decoration and case. The window server and the menu read the
+    /// same title a moment apart, and a terminal's spinner glyph or an editor's unsaved dot can
+    /// change in between.
+    private nonisolated static func normalizedTitle(_ title: String) -> String {
+        var rest = Substring(title)
+        while let first = rest.first, !first.isLetter, !first.isNumber { rest = rest.dropFirst() }
+        return rest.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     }
 
     /// Fronts `window` and sends it the key-state events a real click would have. Without the two
