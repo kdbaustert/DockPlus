@@ -3,6 +3,15 @@
     <channel>
         <title>DockPlus</title>
         <item>
+            <title>0.1.1</title>
+            <pubDate>Sat, 21 Nov 2026 15:37:17 +0000</pubDate>
+            <sparkle:fullReleaseNotesLink>https://github.com/kdbaustert/DockPlus/releases/tag/v0.1.1</sparkle:fullReleaseNotesLink>
+            <sparkle:version>53</sparkle:version>
+            <sparkle:shortVersionString>0.1.1</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
+            <enclosure url="https://github.com/kdbaustert/DockPlus/releases/download/v0.1.1/DockPlus-0.1.1.zip" length="4647460" type="application/octet-stream" sparkle:edSignature="kI4U7dOZwus131QMVjLUOVGujEtQWNOtZgnDs7Q2VXzAEa7YVwZpegFoS4xUCklsxs9UpBNV27eIiAjZNc+qAA=="/>
+        </item>
+        <item>
             <title>0.1.0</title>
             <pubDate>Fri, 09 Oct 2026 18:17:38 +0000</pubDate>
             <sparkle:fullReleaseNotesLink>https://github.com/kdbaustert/DockPlus/releases/tag/v0.1.0</sparkle:fullReleaseNotesLink>
