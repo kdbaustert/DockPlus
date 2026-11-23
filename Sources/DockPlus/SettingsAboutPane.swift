@@ -44,7 +44,7 @@ struct AboutPane: View {
                 title: "Updates", anchor: SettingsAnchor.updates,
                 footer: Updater.isConfigured
                     ? "Updates come from GitHub releases and are checked against DockPlus's signing key before anything installs."
-                    : "This is a local development build; it does not update itself."
+                    : "This is a local development build, so these controls are off and it never updates itself. A release build (RELEASE=1 ./build.sh) turns them on."
             ) {
                 SettingsRow(title: "Check for updates", subtitle: Self.lastCheckDescription(updater.lastCheck)) {
                     Button("Check Now") { updater.checkForUpdates() }
