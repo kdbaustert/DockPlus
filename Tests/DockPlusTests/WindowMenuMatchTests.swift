@@ -30,6 +30,12 @@ final class WindowMenuMatchTests: XCTestCase {
         XCTAssertNil(WindowActions.windowMenuIndex(forTitle: " • ", in: ["•", "Inbox"]))
     }
 
+    /// A terminal in the home folder is titled "~", which normalizes to nothing.
+    func testATitleOfOnlySymbolsMatchesExactly() {
+        XCTAssertEqual(WindowActions.windowMenuIndex(forTitle: "~", in: ["Inbox", "~"]), 1)
+        XCTAssertNil(WindowActions.windowMenuIndex(forTitle: "~", in: ["~/Developer"]))
+    }
+
     func testTwoWindowsWithOneTitleMatchTheFirst() {
         XCTAssertEqual(WindowActions.windowMenuIndex(forTitle: "Untitled", in: ["Notes", "Untitled", "Untitled"]), 1)
     }

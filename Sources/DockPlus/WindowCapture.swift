@@ -152,16 +152,10 @@ enum WindowCapture {
     /// The change that would show `windowID`, on whichever display its Desktop belongs to. nil when
     /// a display already shows it, or the layout cannot be read.
     nonisolated static func trip(toSpaceOf windowID: CGWindowID) -> SpaceTrip? {
-        guard let mainConnection = SkyLight.mainConnection,
-              let copySpacesForWindows = SkyLight.copySpacesForWindows,
-              let spaces = copySpacesForWindows(
-                mainConnection(), SkyLight.allSpacesMask, [NSNumber(value: windowID)] as CFArray)?
-                .takeRetainedValue() as? [NSNumber]
-        else { return nil }
         // Every Space the window is on, not just the first: a window assigned to All Desktops is on
         // all of them, the list starts at Desktop 1, and switching there would yank the user away
         // from a Desktop that already shows it.
-        let windowSpaces = Set(spaces.map(\.uint64Value))
+        let windowSpaces = spaces(holding: [windowID])
         for display in SkyLight.managedDisplays() {
             guard let ident = display["Display Identifier"] as? String,
                   let list = display["Spaces"] as? [[String: Any]],
@@ -172,6 +166,17 @@ enum WindowCapture {
             return SpaceTrip(display: ident, destination: windowSpace, origin: current)
         }
         return nil
+    }
+
+    /// Every Space holding one of `windowIDs`; empty when the layout cannot be read.
+    nonisolated static func spaces(holding windowIDs: [CGWindowID]) -> Set<UInt64> {
+        guard !windowIDs.isEmpty, let mainConnection = SkyLight.mainConnection,
+              let copySpacesForWindows = SkyLight.copySpacesForWindows,
+              let spaces = copySpacesForWindows(
+                mainConnection(), SkyLight.allSpacesMask, windowIDs.map { NSNumber(value: $0) } as CFArray)?
+                .takeRetainedValue() as? [NSNumber]
+        else { return [] }
+        return Set(spaces.map(\.uint64Value))
     }
 
     /// Whether `trip`'s display now shows its destination.
@@ -374,7 +379,8 @@ enum WindowActions {
             return
         }
         Task {
-            let travelled = await dockTravels(trip, to: windowID, pid: pid, axWindow: axWindow)
+            let travelled = await dockTravels(
+                trip, to: windowID, pid: pid, axWindow: axWindow, generation: generation)
             guard generation == raiseGeneration else { return }
             if !travelled {
                 NSLog("DockPlus: the Dock did not travel to window %u; switching Desktops without it", windowID)
@@ -400,26 +406,37 @@ enum WindowActions {
     /// Has the Dock switch to the window's Desktop itself, which redraws the screen where
     /// `WindowCapture.travelToSpace` does not. Activating the app is enough when it has nothing in
     /// view. Otherwise, and for Finder, the window's entry in the app's Window menu is pressed: the
-    /// app orders the window front and the Dock follows. False when neither moved the display.
+    /// app orders the window front and the Dock follows. False when neither moved the display, or
+    /// a later raise (a newer `generation`) replaced this one before it asked the Dock to move.
     private static func dockTravels(
-        _ trip: WindowCapture.SpaceTrip, to windowID: CGWindowID, pid: pid_t, axWindow: AXUIElement?
+        _ trip: WindowCapture.SpaceTrip, to windowID: CGWindowID, pid: pid_t, axWindow: AXUIElement?,
+        generation: Int
     ) async -> Bool {
         let app = NSRunningApplication(processIdentifier: pid)
         let arrived = { WindowCapture.hasArrived(trip) }
+        let isReplaced = { generation != raiseGeneration }
         if let inView = windowInView(of: pid, besides: windowID) {
             // By window: activating an app that has a window in view never travels, and can pull
             // the window being raised onto this Desktop instead.
             _ = focus(inView, pid: pid)
+        } else if hasWindowsOffTrip(pid: pid, trip: trip),
+                  windowMenuItem(for: windowID, pid: pid, axWindow: axWindow) != nil {
+            // Activation would go to the Desktop of the app's key window, which need not be this
+            // one's, and the press below would then travel a second time. Fronting by window id
+            // does not travel (measured on macOS 27.2), so the press is the only move.
+            _ = focus(windowID, pid: pid)
         } else {
             app?.activate()
             if travelsOnActivation(app), await waits(upTo: travelWait, until: arrived) { return true }
         }
-        guard let item = windowMenuItem(for: windowID, pid: pid, axWindow: axWindow) else { return false }
+        guard !isReplaced(), let item = windowMenuItem(for: windowID, pid: pid, axWindow: axWindow)
+        else { return false }
         // The press is refused until the app is the active one, a few event-loop turns after the
         // window server accepts the front.
         _ = await waits(upTo: .milliseconds(300)) {
             NSWorkspace.shared.frontmostApplication?.processIdentifier == pid
         }
+        guard !isReplaced() else { return false }
         // The reply waits on the app ordering its window front, which the 0.3s the reads get can cut short.
         AXUIElementSetMessagingTimeout(item, 1)
         guard AXUIElementPerformAction(item, kAXPressAction as CFString) == .success else { return false }
@@ -454,6 +471,16 @@ enum WindowActions {
             .first { $0 != windowID }
     }
 
+    /// Whether `pid` has a window on some Desktop other than `trip`'s destination, where activating
+    /// the app could take the Dock instead.
+    private static func hasWindowsOffTrip(pid: pid_t, trip: WindowCapture.SpaceTrip) -> Bool {
+        let all = CGWindowListCopyWindowInfo([.excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+        let ids = all
+            .filter { ($0[kCGWindowOwnerPID as String] as? pid_t) == pid && ($0[kCGWindowLayer as String] as? Int) == 0 }
+            .compactMap { $0[kCGWindowNumber as String] as? CGWindowID }
+        return !WindowCapture.spaces(holding: ids).subtracting([trip.destination]).isEmpty
+    }
+
     /// The window's entry in its app's Window menu, found by title because the item names its window
     /// by nothing else. nil when the menu lists no such window or Accessibility is not granted.
     private static func windowMenuItem(for windowID: CGWindowID, pid: pid_t, axWindow: AXUIElement?) -> AXUIElement? {
@@ -462,24 +489,38 @@ enum WindowActions {
         let serverTitle = (info?.first?[kCGWindowName as String] as? String).flatMap { $0.isEmpty ? nil : $0 }
         guard let title = serverTitle ?? axWindow.flatMap({ string(of: $0, kAXTitleAttribute) })
         else { return nil }
-        let app = AXUIElementCreateApplication(pid)
-        AXUIElementSetMessagingTimeout(app, 0.3)
+        // A timeout holds only for the element it is set on, and these reads run on the main actor:
+        // without it a stalled app holds the bar for the default six seconds per read.
+        let limited = { (element: AXUIElement) -> AXUIElement in
+            AXUIElementSetMessagingTimeout(element, 0.3)
+            return element
+        }
+        let app = limited(AXUIElementCreateApplication(pid))
         var bar: CFTypeRef?
         guard AXUIElementCopyAttributeValue(app, kAXMenuBarAttribute as CFString, &bar) == .success,
-              let bar = bar.map({ $0 as! AXUIElement })
+              let bar = bar.map({ limited($0 as! AXUIElement) })
         else { return nil }
-        // AppKit sets this action on every item it adds to a windows menu, whatever the menu is called.
-        let items = children(of: bar).flatMap(children(of:)).flatMap(children(of:))
-            .filter { string(of: $0, kAXIdentifierAttribute) == "makeKeyAndOrderFront:" }
-        let titles = items.map { string(of: $0, kAXTitleAttribute) ?? "" }
-        return windowMenuIndex(forTitle: title, in: titles).map { items[$0] }
+        // From the right, where the Window menu sits next to Help, stopping at the first menu that
+        // lists windows: Xcode's menus hold hundreds of items, two reads each. AppKit sets this
+        // action on every item it adds to a windows menu, whatever the menu is called.
+        for menu in children(of: bar).reversed().map(limited).flatMap(children(of:)).map(limited) {
+            let items = children(of: menu).map(limited)
+                .filter { string(of: $0, kAXIdentifierAttribute) == "makeKeyAndOrderFront:" }
+            guard !items.isEmpty else { continue }
+            let titles = items.map { string(of: $0, kAXTitleAttribute) ?? "" }
+            return windowMenuIndex(forTitle: title, in: titles).map { items[$0] }
+        }
+        return nil
     }
 
     /// Which of a Window menu's item titles names the window titled `title`. Two windows with one
     /// title match the first, which is still a window of the right app on the right Desktop.
+    /// A title that is nothing but symbols, a terminal's "~" say, has nothing to normalize and must
+    /// match exactly.
     nonisolated static func windowMenuIndex(forTitle title: String, in itemTitles: [String]) -> Int? {
+        guard !title.isEmpty else { return nil }
         let wanted = normalizedTitle(title)
-        guard !wanted.isEmpty else { return nil }
+        guard !wanted.isEmpty else { return itemTitles.firstIndex(of: title) }
         return itemTitles.firstIndex { normalizedTitle($0) == wanted }
     }
 
