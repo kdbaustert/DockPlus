@@ -229,6 +229,50 @@ extension DockSettings {
 
 // MARK: - Export and import
 
+/// An exported file: the portable settings at the top level, as every export has written them, and
+/// this Mac's update choices under "updates". Those stay out of `PortableSettings`, which iCloud also
+/// syncs: they live in Sparkle's defaults, not in `DockSettings`, so sync would never see them change.
+/// An older DockPlus imports the file all the same, since decoding skips keys it doesn't know.
+struct SettingsExport: Codable, Equatable {
+    var settings: PortableSettings
+    /// `Updater.exportedDefaultsKeys` as `UserDefaults` holds them. A choice never made stays out,
+    /// so importing does not store today's Info.plist default as though it were one.
+    var updates: [String: Bool]?
+
+    private enum CodingKeys: String, CodingKey { case updates }
+
+    init(settings: PortableSettings, updates: [String: Bool]?) {
+        self.settings = settings
+        self.updates = updates
+    }
+
+    init(from decoder: any Decoder) throws {
+        settings = try PortableSettings(from: decoder)
+        updates = try decoder.container(keyedBy: CodingKeys.self).decodeIfPresent([String: Bool].self, forKey: .updates)
+    }
+
+    func encode(to encoder: any Encoder) throws {
+        try settings.encode(to: encoder)
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodeIfPresent(updates, forKey: .updates)
+    }
+
+    func encoded() throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        return try encoder.encode(self)
+    }
+
+    static func decoded(from data: Data) throws -> SettingsExport {
+        try JSONDecoder().decode(SettingsExport.self, from: data)
+    }
+
+    /// Only the keys this build exports, so a file cannot write anything else into DockPlus's defaults.
+    var knownUpdates: [String: Bool] {
+        (updates ?? [:]).filter { Updater.exportedDefaultsKeys.contains($0.key) }
+    }
+}
+
 @MainActor
 enum SettingsFile {
     static func export(_ settings: DockSettings) {
@@ -236,8 +280,12 @@ enum SettingsFile {
         panel.nameFieldStringValue = "DockPlus Settings.json"
         panel.allowedContentTypes = [.json]
         guard panel.runModal() == .OK, let url = panel.url else { return }
+        let updates = Updater.exportedDefaultsKeys.reduce(into: [String: Bool]()) { updates, key in
+            updates[key] = UserDefaults.standard.object(forKey: key) as? Bool
+        }
         do {
-            try settings.portable.encoded().write(to: url, options: .atomic)
+            let file = SettingsExport(settings: settings.portable, updates: updates.isEmpty ? nil : updates)
+            try file.encoded().write(to: url, options: .atomic)
         } catch {
             NSAlert(error: error).runModal()
         }
@@ -249,13 +297,18 @@ enum SettingsFile {
         panel.allowsMultipleSelection = false
         guard panel.runModal() == .OK, let url = panel.url else { return }
         do {
-            let imported = try PortableSettings.decoded(from: Data(contentsOf: url))
+            let file = try SettingsExport.decoded(from: Data(contentsOf: url))
+            let imported = file.settings
             // Every field is optional, so any JSON object decodes; one with no setting in it is
             // some other file, and applying it would do nothing without saying so.
-            guard !imported.isEmpty else { throw CocoaError(.fileReadCorruptFile) }
+            guard !imported.isEmpty || !file.knownUpdates.isEmpty else { throw CocoaError(.fileReadCorruptFile) }
             // An edge or a range this build lacks would import partly and say nothing.
             guard !imported.isBeyondThisBuild else { return showNewerVersionAlert() }
             settings.apply(imported)
+            for (key, value) in file.knownUpdates {
+                UserDefaults.standard.set(value, forKey: key)
+            }
+            Updater.shared.reload()
         } catch {
             if PortableSettings.isFromNewerDockPlus(error) { return showNewerVersionAlert() }
             let alert = NSAlert()

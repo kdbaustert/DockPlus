@@ -1,17 +1,15 @@
 import AppKit
-import Sparkle
 
 /// DockPlus's menu bar icon, present while the "Show menu bar icon" setting is on. Hiding it loses
-/// nothing: Settings and Quit are also on the dock's own right-click menu.
+/// nothing: Settings and Quit are also on the dock's own right-click menu, and updates are in
+/// Settings ▸ About.
 @MainActor
 final class MenuBarItem: NSObject, NSMenuDelegate {
     private let settings: DockSettings
-    private let updater: SPUStandardUpdaterController?
     private var item: NSStatusItem?
 
-    init(settings: DockSettings, updater: SPUStandardUpdaterController?) {
+    init(settings: DockSettings) {
         self.settings = settings
-        self.updater = updater
         super.init()
         update()
     }
@@ -38,15 +36,6 @@ final class MenuBarItem: NSObject, NSMenuDelegate {
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
         menu.addItem(ClosureMenuItem("DockPlus Settings…") { SettingsWindow.show() })
-        // Aimed at the controller's own action, which also validates the item: it greys out while a
-        // check is already running. Absent from a local build, which has no feed to check.
-        if let updater {
-            let check = NSMenuItem(
-                title: "Check for Updates…",
-                action: #selector(SPUStandardUpdaterController.checkForUpdates(_:)), keyEquivalent: "")
-            check.target = updater
-            menu.addItem(check)
-        }
         menu.addItem(.separator())
         menu.addItem(ClosureMenuItem("Quit DockPlus") { NSApp.terminate(nil) })
     }

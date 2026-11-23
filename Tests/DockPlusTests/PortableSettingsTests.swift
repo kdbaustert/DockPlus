@@ -20,6 +20,30 @@ final class PortableSettingsTests: XCTestCase {
         XCTAssertNil(partial.pinnedApps)
     }
 
+    func testExportRoundTripsUpdateChoices() throws {
+        let original = SettingsExport(
+            settings: PortableSettings(iconSize: 40, pinnedApps: ["/Applications/Safari.app"]),
+            updates: ["SUEnableAutomaticChecks": false, "SUAutomaticallyUpdate": true])
+        XCTAssertEqual(try SettingsExport.decoded(from: original.encoded()), original)
+    }
+
+    /// The update choices sit beside the settings, so an older DockPlus still imports the settings,
+    /// and a file from before them imports with no update choices.
+    func testExportStaysReadableBothWays() throws {
+        let export = SettingsExport(settings: PortableSettings(iconSize: 40), updates: ["SUAutomaticallyUpdate": true])
+        XCTAssertEqual(try PortableSettings.decoded(from: export.encoded()), PortableSettings(iconSize: 40))
+
+        let old = try SettingsExport.decoded(from: PortableSettings(iconSize: 40).encoded())
+        XCTAssertEqual(old.settings, PortableSettings(iconSize: 40))
+        XCTAssertNil(old.updates)
+    }
+
+    func testImportKeepsOnlyExportedUpdateKeys() throws {
+        let file = try SettingsExport.decoded(
+            from: Data(#"{"updates": {"SUAutomaticallyUpdate": true, "SUSkippedVersion": true}}"#.utf8))
+        XCTAssertEqual(file.knownUpdates, ["SUAutomaticallyUpdate": true])
+    }
+
     /// A file landing in the second before this Mac's write: what the other Mac changed comes in,
     /// this Mac's unsent edit stays, and where both changed a setting the file wins.
     func testMergeKeepsUnsentEditsAndTakesTheirs() {

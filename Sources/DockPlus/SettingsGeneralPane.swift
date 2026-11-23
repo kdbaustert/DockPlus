@@ -123,17 +123,6 @@ struct GeneralPane: View {
                     pane: "Accessibility")
             }
             SettingsSection(
-                title: "Updates", anchor: SettingsAnchor.updates,
-                footer: Updater.isConfigured
-                    ? "Updates come from GitHub releases. Check from the menu bar icon."
-                    : "This is a local development build; it does not update itself."
-            ) {
-                SettingsToggle(
-                    title: "Receive beta updates",
-                    isOn: Binding(get: { UpdateChannels.receivesBetas }, set: { UpdateChannels.receivesBetas = $0 }))
-                    .disabled(!Updater.isConfigured)
-            }
-            SettingsSection(
                 title: "iCloud", anchor: SettingsAnchor.iCloud,
                 footer: SettingsSync.isAvailable
                     ? "Every Mac signed in to your iCloud account with this on shares one set of settings, kept in iCloud Drive ▸ DockPlus. Hiding the macOS Dock stays per Mac."

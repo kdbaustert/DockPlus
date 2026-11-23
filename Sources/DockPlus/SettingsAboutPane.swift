@@ -2,6 +2,8 @@ import AppKit
 import SwiftUI
 
 struct AboutPane: View {
+    private let updater = Updater.shared
+
     private var version: String {
         let info = Bundle.main.infoDictionary
         let short = info?["CFBundleShortVersionString"] as? String ?? "dev"
@@ -38,6 +40,36 @@ struct AboutPane: View {
                 RoundedRectangle(cornerRadius: SettingsChrome.cardCorner, style: .continuous)
                     .strokeBorder(SettingsChrome.cardBorder, lineWidth: SettingsChrome.hairline))
 
+            SettingsSection(
+                title: "Updates", anchor: SettingsAnchor.updates,
+                footer: Updater.isConfigured
+                    ? "Updates come from GitHub releases and are checked against DockPlus's signing key before anything installs."
+                    : "This is a local development build; it does not update itself."
+            ) {
+                SettingsRow(title: "Check for updates", subtitle: Self.lastCheckDescription(updater.lastCheck)) {
+                    Button("Check Now") { updater.checkForUpdates() }
+                        .disabled(!updater.canCheck || !Updater.isConfigured)
+                }
+                SettingsToggle(
+                    title: "Check automatically",
+                    subtitle: "Look for a new version about once a day, and say when there is one.",
+                    isOn: Binding(get: { updater.automaticallyChecks }, set: { updater.automaticallyChecks = $0 }))
+                    .disabled(!Updater.isConfigured)
+                SettingsToggle(
+                    title: "Install automatically",
+                    // The footer already covers a build with no feed; this covers the other reason
+                    // the toggle is greyed out.
+                    subtitle: "Download updates without asking and install them when DockPlus quits."
+                        + (Updater.isConfigured && !updater.automaticallyChecks
+                            ? " Needs the automatic check above." : ""),
+                    isOn: Binding(get: { updater.automaticallyDownloads }, set: { updater.automaticallyDownloads = $0 }))
+                    .disabled(!Updater.isConfigured || !updater.automaticallyChecks)
+                SettingsToggle(
+                    title: "Receive beta updates",
+                    isOn: Binding(get: { UpdateChannels.receivesBetas }, set: { UpdateChannels.receivesBetas = $0 }))
+                    .disabled(!Updater.isConfigured)
+            }
+
             SettingsSection(title: "DockPlus", anchor: SettingsAnchor.build) {
                 SettingsRow(title: "Version") {
                     Text(version)
@@ -53,5 +85,14 @@ struct AboutPane: View {
                 }
             }
         }
+    }
+
+    /// "Never checked." is shown rather than nothing: an updater that has never run is what this
+    /// row is there to catch.
+    private static func lastCheckDescription(_ date: Date?) -> String {
+        guard let date else { return "Never checked." }
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .full
+        return "Last checked \(formatter.localizedString(for: date, relativeTo: Date()))."
     }
 }

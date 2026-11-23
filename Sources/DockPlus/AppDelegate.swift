@@ -1,6 +1,5 @@
 import AppKit
 import ServiceManagement
-import Sparkle
 
 @main
 @MainActor
@@ -32,13 +31,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Why the dock is out of sight, by the notification that said so. Paused while any is.
     private var pauseReasons: Set<Notification.Name> = []
     private var isPaused: Bool { !pauseReasons.isEmpty }
-    /// Answers Sparkle's "which channels?" before each check. Held here because Sparkle keeps only
-    /// a weak reference to its delegate.
-    private let updateChannels = UpdateChannels()
-    /// Likewise weakly held by Sparkle's user driver.
-    private let updateReminders = UpdateReminders()
-    /// nil in a build with no feed (every plain `build.sh` build), where an updater could only fail.
-    private var updater: SPUStandardUpdaterController?
     /// Held so the sources stay armed; see `installSignalHandlers`.
     private var signalSources: [DispatchSourceSignal] = []
 
@@ -67,12 +59,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ) { [weak self] _ in
             MainActor.assumeIsolated { self?.scheduleRebuild() }
         }
-        // `startingUpdater: true` starts the scheduled daily check (SUEnableAutomaticChecks).
-        if Updater.isConfigured {
-            updater = SPUStandardUpdaterController(
-                startingUpdater: true, updaterDelegate: updateChannels, userDriverDelegate: updateReminders)
-        }
-        menuBarItem = MenuBarItem(settings: settings, updater: updater)
+        // At launch, not when About is first opened: the scheduled check starts with the updater.
+        // Skipped in a build with no feed (every plain `build.sh` build), where it could only fail.
+        if Updater.isConfigured { _ = Updater.shared }
+        menuBarItem = MenuBarItem(settings: settings)
         settingsSync = SettingsSync(settings: settings)
         // Before the hide: a kill during its waits otherwise took the default action, mid-change.
         installSignalHandlers()
@@ -272,7 +262,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// update's relaunch: the new copy starts at once and hides the Dock again from the saved
     /// originals, which stay in place.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard settings.hidesSystemDock, !updateChannels.isRelaunchingForUpdate else { return .terminateNow }
+        guard settings.hidesSystemDock, !(Updater.isConfigured && Updater.shared.isRelaunchingForUpdate)
+        else { return .terminateNow }
         if Self.isSystemQuit() {
             if SMAppService.mainApp.status != .enabled {
                 watchdog?.invalidate()

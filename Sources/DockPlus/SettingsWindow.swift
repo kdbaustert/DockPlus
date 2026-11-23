@@ -65,7 +65,7 @@ enum SettingsAnchor {
     static let autoHide = "interactions.autoHide"
     static let display = "general.display"
     static let permissions = "general.permissions"
-    static let updates = "general.updates"
+    static let updates = "about.updates"
     static let widgets = "widgets.widgets"
     static let widgetOptions = "widgets.options"
     static let spacers = "widgets.spacers"
@@ -116,8 +116,6 @@ private enum SettingsIndex {
              ["bounce", "attention", "notify", "alert", "jump", "system dock"]),
         item("permissions", .general, SettingsAnchor.permissions, "Permissions", "Screen Recording and Accessibility",
              ["permission", "screen recording", "accessibility", "granted", "privacy"]),
-        item("betaUpdates", .general, SettingsAnchor.updates, "Updates", "Receive beta updates",
-             ["update", "beta", "sparkle", "version", "check"]),
         item("nowPlayingWidget", .widgets, SettingsAnchor.widgets, "Widgets", "Now playing",
              ["music", "spotify", "track", "widget", "now playing"]),
         item("weatherWidget", .widgets, SettingsAnchor.widgets, "Widgets", "Weather",
@@ -193,6 +191,14 @@ private enum SettingsIndex {
         item("stacks", .stacks, SettingsAnchor.stacks, "Folders", "Stacks",
              ["folder", "downloads", "add folder", "stack", "sort", "order", "date added", "kind",
               "grid", "menu", "view content as", "display"]),
+        item("checkForUpdates", .about, SettingsAnchor.updates, "Updates", "Check for updates",
+             ["update", "updates", "upgrade", "new version", "sparkle", "check", "latest", "release", "download"]),
+        item("automaticUpdateChecks", .about, SettingsAnchor.updates, "Updates", "Check automatically",
+             ["update", "updates", "automatic", "background", "notify", "sparkle"]),
+        item("automaticUpdateInstall", .about, SettingsAnchor.updates, "Updates", "Install automatically",
+             ["update", "updates", "automatic", "install", "silent", "unattended", "sparkle"]),
+        item("betaUpdates", .about, SettingsAnchor.updates, "Updates", "Receive beta updates",
+             ["update", "beta", "sparkle", "version", "check"]),
         item("version", .about, SettingsAnchor.build, "DockPlus", "Version",
              ["version", "build", "about"]),
         item("sourceCode", .about, SettingsAnchor.build, "DockPlus", "Source code",
